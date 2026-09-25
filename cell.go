@@ -26,7 +26,7 @@ var (
 
 const (
 	blockSize    = 2 << 20
-	tick         = 100 * time.Millisecond
+	tick         = 50 * time.Millisecond
 	minFree      = 1 << 20
 	maxFrameSize = 1 << 31
 	ioAlign      = 4096

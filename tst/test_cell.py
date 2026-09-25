@@ -124,6 +124,8 @@ if not dropped:
 if c.status()[0] != head:
     lib.fail(f"head {c.status()[0]} after cancels, expected {head}")
 
+expect = head
+
 # a restart keeps everything that was acknowledged
 if cell.stop() != 0:
     lib.fail("cell did not exit cleanly on SIGTERM")

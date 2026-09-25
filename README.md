@@ -19,7 +19,7 @@ Inside, a cell is an append-only log cut into 2 MiB blocks, and the
 offset is the position in that log. The SSD is two places so that
 reads and writes do not fight over one: `-store` takes the writes,
 `-load` serves the reads. New data goes into `<n>.current` in the
-store: a writer wakes every 100 ms, writes everything that arrived
+store: a writer wakes every 50 ms, writes everything that arrived
 since the last tick, fsyncs once and only then answers with the offsets.
 A block that is full is renamed to plain `<n>`; a second goroutine
 copies those to the raw HDD at `n * 2 MiB`, fsyncs and removes them.
