@@ -219,5 +219,9 @@ checked, no CORS, no bucket policies, ACLs or versioning.
 
 `./build` builds `.build/bin/s3` and publishes `./s3`. `./build test`
 runs the end-to-end suite in `tst/`; the S3 scenario needs an etcd
-binary, `S3_TEST_ETCD=/path/to/etcd` or `etcd` on PATH. See `STYLE.md` for the code style
+binary, `S3_TEST_ETCD=/path/to/etcd` or `etcd` on PATH. `dev/stand.py`
+drives a live stand through a few hundred objects of mixed sizes: put,
+list, the flush to the HDD, reads from the HDD and then from the load,
+ranges, an overwrite, deletes one by one and in bulk, with timings;
+`--hosts` adds a look inside every cell over ssh. See `STYLE.md` for the code style
 and `CLAUDE.md` for the working conventions.
