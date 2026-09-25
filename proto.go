@@ -19,6 +19,7 @@ func readFrame(r io.Reader) (byte, []byte) {
 	}
 
 	payload := make([]byte, n)
+
 	throw2(io.ReadFull(r, payload))
 
 	return hdr[0], payload
@@ -39,7 +40,6 @@ func (c *Cell) serve(conn net.Conn) {
 
 	for {
 		op, payload := readFrame(conn)
-
 		status, resp := c.handle(op, payload)
 
 		writeFrame(conn, status, resp)

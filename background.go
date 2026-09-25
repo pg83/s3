@@ -31,6 +31,7 @@ func (s *Store) repairAll() {
 
 		for _, entry := range found {
 			from = entry.key + "\x00"
+
 			rest := strings.TrimPrefix(entry.key, "repair/")
 			bucket, key, ok := strings.Cut(rest, "/")
 

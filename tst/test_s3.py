@@ -121,6 +121,51 @@ keys, _, _, _ = listing("prefix=dir/&marker=dir/a.txt")
 if keys != ["dir/b.txt", "dir/sub/c.txt"]:
     lib.fail(f"list v1 marker: {keys}")
 
+keys, prefixes, truncated, token = listing("list-type=2&delimiter=/&max-keys=2")
+if keys != ["big"] or prefixes != ["dir/"] or not truncated or token != "dir/":
+    lib.fail(f"list delimited page 1: {keys} {prefixes} {truncated} {token}")
+
+keys, prefixes, _, _ = listing("list-type=2&delimiter=/&max-keys=2&continuation-token=dir/")
+if keys != ["empty", "odd"] or prefixes:
+    lib.fail(f"list delimited page 2: {keys} {prefixes}")
+
+# the browser
+web = cluster.web()
+
+def page(path):
+    status, headers, body = web.request("GET", path)
+    if status != 200 or not headers.get("content-type", "").startswith("text/html"):
+        lib.fail(f"web {path}: {status} {headers.get('content-type')}")
+    return body.decode()
+
+html = page("/")
+if 'href="/b/photos"' not in html or "no buckets" in html:
+    lib.fail(f"web buckets: {html[-800:]}")
+
+html = page("/b/photos")
+for needle in ('href="/b/photos?prefix=dir%2F"', 'href="/o/photos/big"', 'href="/o/photos/tiny"', ">Folders<", ">Files<"):
+    if needle not in html:
+        lib.fail(f"web bucket lacks {needle}: {html[-1200:]}")
+if 'href="/o/photos/dir/a.txt"' in html:
+    lib.fail("web bucket shows a nested file at the top level")
+
+html = page("/b/photos?prefix=dir/")
+for needle in ('href="/b/photos?prefix=dir%2Fsub%2F"', 'href="/o/photos/dir/a.txt"', '<span class="cur">dir</span>'):
+    if needle not in html:
+        lib.fail(f"web folder lacks {needle}: {html[-1200:]}")
+
+html = page("/b/nope")
+if "no such bucket" not in html:
+    lib.fail("web missing bucket is not reported")
+
+status, headers, body = web.request("GET", "/o/photos/big")
+if status != 200 or body != blobs["big"] or headers.get("content-type") != "text/plain":
+    lib.fail(f"web object: {status} {len(body)} {headers.get('content-type')}")
+
+status, _, _ = web.request("GET", "/o/photos/nope")
+if status != 404:
+    lib.fail(f"web missing object: {status}")
+
 # delete
 status, _, _ = s3.request("DELETE", "/photos/dir/a.txt")
 if status != 204:

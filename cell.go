@@ -16,6 +16,11 @@ import (
 	"time"
 )
 
+var (
+	errFull  = errors.New("cell: full")
+	errRange = errors.New("cell: past the head")
+)
+
 const (
 	blockSize    = 2 << 20
 	tick         = 100 * time.Millisecond
@@ -31,9 +36,6 @@ const (
 	opStatus     = 3
 	maxFrameSize = 1 << 31
 )
-
-var errFull = errors.New("cell: full")
-var errRange = errors.New("cell: past the head")
 
 type WriteReq struct {
 	data []byte
@@ -77,6 +79,7 @@ func runCell(listen, ssd, hdd string) {
 	go c.sweeper()
 
 	stop := make(chan os.Signal, 1)
+
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
 
 	go func() {
@@ -210,7 +213,9 @@ func (c *Cell) head() int64 {
 
 func (c *Cell) append(data []byte) (int64, error) {
 	done := make(chan WriteResp, 1)
+
 	c.writes <- WriteReq{data: data, done: done}
+
 	resp := <-done
 
 	return resp.offset, resp.err
@@ -339,6 +344,7 @@ func (c *Cell) open(num int64) *os.File {
 	}
 
 	c.fill.Lock()
+
 	defer c.fill.Unlock()
 
 	if f, err := os.Open(c.lruPath(num)); err == nil {
@@ -372,6 +378,7 @@ func (c *Cell) sweep() {
 	entries := throw2(os.ReadDir(dir))
 
 	var total int64
+
 	infos := make([]os.FileInfo, 0, len(entries))
 
 	for _, entry := range entries {

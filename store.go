@@ -12,9 +12,11 @@ import (
 	"time"
 )
 
-var errTooFewCells = errors.New("store: fewer than two cells took the object")
-var errUnreadable = errors.New("store: no combination of pieces matches the md5")
-var errNoSuchKey = errors.New("store: no such key")
+var (
+	errTooFewCells = errors.New("store: fewer than two cells took the object")
+	errUnreadable  = errors.New("store: no combination of pieces matches the md5")
+	errNoSuchKey   = errors.New("store: no such key")
+)
 
 type Piece struct {
 	Cell   int   `json:"cell"`
@@ -100,6 +102,7 @@ func split(data []byte) [3][]byte {
 
 func assemble(d0, d1 []byte, size int64) []byte {
 	out := make([]byte, 0, size)
+
 	out = append(out, d0...)
 
 	return append(out, d1[:size-int64(len(d0))]...)
@@ -113,7 +116,9 @@ func md5hex(data []byte) string {
 
 func (s *Store) hostOrder(key string) []string {
 	h := fnv.New32a()
+
 	h.Write([]byte(key))
+
 	start := int(h.Sum32() % uint32(len(s.hosts)))
 
 	var order []string
@@ -127,6 +132,7 @@ func (s *Store) hostOrder(key string) []string {
 
 func (s *Store) appendTo(host string, data []byte) (Piece, bool) {
 	cells := append([]CellSpec(nil), s.byHost[host]...)
+
 	rand.Shuffle(len(cells), func(i, j int) { cells[i], cells[j] = cells[j], cells[i] })
 
 	for _, c := range cells {
@@ -386,6 +392,7 @@ func (s *Store) repair(bucket, key string, bad int) {
 	}
 
 	p.Piece = missing[0]
+
 	pieces := []Piece{p}
 
 	for _, old := range m.Pieces {

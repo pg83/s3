@@ -270,6 +270,16 @@ class Cluster:
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
         ))
 
+    def web(self):
+        port = free_port()
+        self.procs.append(subprocess.Popen(
+            [BINARY, "web", "-c", self.config, "-listen", f"127.0.0.1:{port}"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+        ))
+        wait_port(port)
+
+        return S3(port)
+
     def host(self, index):
         return self.hosts[index]
 

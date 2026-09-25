@@ -68,6 +68,7 @@ func entries(raw json.RawMessage) []Entry {
 
 	for _, kv := range kvs {
 		rev, _ := strconv.ParseInt(kv.ModRevision, 10, 64)
+
 		out = append(out, Entry{key: string(unb64(kv.Key)), value: unb64(kv.Value), rev: rev})
 	}
 
@@ -100,14 +101,19 @@ func prefixEnd(prefix string) string {
 
 func (e *Etcd) scan(prefix, from string, limit int) ([]Entry, bool) {
 	start := prefix
+	end := prefixEnd(prefix)
 
 	if from > start {
 		start = from
 	}
 
+	if end != "\x00" && start >= end {
+		return nil, false
+	}
+
 	out := e.call("range", map[string]any{
 		"key":       b64([]byte(start)),
-		"range_end": b64([]byte(prefixEnd(prefix))),
+		"range_end": b64([]byte(end)),
 		"limit":     strconv.Itoa(limit),
 	})
 

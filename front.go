@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"io"
@@ -14,7 +13,10 @@ import (
 	"time"
 )
 
-const listLimit = 1000
+const (
+	listLimit = 1000
+	s3Time    = "2006-01-02T15:04:05.000Z"
+)
 
 type Front struct {
 	store *Store
@@ -132,7 +134,6 @@ func (f *Front) route(w http.ResponseWriter, r *http.Request) {
 
 func (f *Front) listBuckets(w http.ResponseWriter) {
 	out := ListAllMyBucketsResult{Owner: Owner{ID: "s3", DisplayName: "s3"}}
-
 	from := ""
 
 	for {
@@ -205,8 +206,6 @@ func (f *Front) bucketOp(w http.ResponseWriter, r *http.Request, bucket string) 
 	}
 }
 
-const s3Time = "2006-01-02T15:04:05.000Z"
-
 func (f *Front) listObjects(w http.ResponseWriter, r *http.Request, bucket string) {
 	q := r.URL.Query()
 	prefix := q.Get("prefix")
@@ -228,88 +227,34 @@ func (f *Front) listObjects(w http.ResponseWriter, r *http.Request, bucket strin
 		}
 	}
 
-	root := "obj/" + bucket + "/"
 	out := ListBucketResult{Name: bucket, Prefix: prefix, Delimiter: delimiter, MaxKeys: maxKeys, EncodingType: q.Get("encoding-type")}
-	from := root + prefix
+	found := f.store.list(bucket, prefix, delimiter, after, maxKeys)
 
-	if after != "" && root+after > from {
-		from = root + after + "\x00"
+	for _, cp := range found.Dirs {
+		out.CommonPrefixes = append(out.CommonPrefixes, CommonPrefix{Prefix: encodeKey(cp, out.EncodingType)})
 	}
 
-	seen := map[string]bool{}
-	last := ""
-	skip := ""
-	count := 0
-
-	for count < maxKeys {
-		found, more := f.store.etcd.scan(root+prefix, from, listLimit)
-
-		for _, entry := range found {
-			from = entry.key + "\x00"
-			rel := strings.TrimPrefix(entry.key, root)
-
-			if skip != "" && strings.HasPrefix(rel, skip) {
-				continue
-			}
-
-			if delimiter != "" {
-				if i := strings.Index(rel[len(prefix):], delimiter); i >= 0 {
-					cp := rel[:len(prefix)+i+len(delimiter)]
-
-					if !seen[cp] {
-						seen[cp] = true
-						out.CommonPrefixes = append(out.CommonPrefixes, CommonPrefix{Prefix: encodeKey(cp, out.EncodingType)})
-						count++
-						last = cp
-					}
-
-					skip = cp
-
-					if count >= maxKeys {
-						break
-					}
-
-					continue
-				}
-			}
-
-			m := Manifest{}
-
-			throw(json.Unmarshal(entry.value, &m))
-
-			out.Contents = append(out.Contents, Object{
-				Key:          encodeKey(rel, out.EncodingType),
-				LastModified: m.Mtime.UTC().Format(s3Time),
-				ETag:         `"` + m.Md5 + `"`,
-				Size:         m.Size,
-				StorageClass: "STANDARD",
-			})
-			count++
-			last = rel
-
-			if count >= maxKeys {
-				break
-			}
-		}
-
-		if !more || len(found) == 0 {
-			break
-		}
+	for _, o := range found.Objects {
+		out.Contents = append(out.Contents, Object{
+			Key:          encodeKey(o.Key, out.EncodingType),
+			LastModified: o.Mtime.UTC().Format(s3Time),
+			ETag:         `"` + o.Md5 + `"`,
+			Size:         o.Size,
+			StorageClass: "STANDARD",
+		})
 	}
 
-	if count >= maxKeys {
-		if found, _ := f.store.etcd.scan(root+prefix, from, 1); len(found) > 0 {
-			out.IsTruncated = true
+	out.KeyCount = len(found.Dirs) + len(found.Objects)
 
-			if v2 {
-				out.NextContinuationToken = last
-			} else {
-				out.NextMarker = last
-			}
+	if found.Next != "" {
+		out.IsTruncated = true
+
+		if v2 {
+			out.NextContinuationToken = found.Next
+		} else {
+			out.NextMarker = found.Next
 		}
 	}
-
-	out.KeyCount = count
 
 	if v2 {
 		out.ContinuationToken = q.Get("continuation-token")
@@ -373,6 +318,7 @@ func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key str
 		throw(err)
 
 		h := w.Header()
+
 		h.Set("ETag", `"`+m.Md5+`"`)
 		h.Set("Last-Modified", m.Mtime.UTC().Format(http.TimeFormat))
 		h.Set("Accept-Ranges", "bytes")
@@ -476,6 +422,7 @@ func readBody(r *http.Request) []byte {
 	}
 
 	var out []byte
+
 	br := bufio.NewReader(r.Body)
 
 	for {

@@ -124,8 +124,13 @@ s3 background -c config.json
 s3 web -c config.json -listen addr
 ```
 
-`s3 web` lists buckets and objects from etcd and can fetch an object
-through the same reader the front uses.
+`s3 web` is the browser: `/` lists the buckets, `/b/<bucket>?prefix=`
+walks a bucket folder by folder (the delimiter is `/`, 500 entries a
+page, `after=` continues), and `/o/<bucket>/<key>` fetches an object
+through the same reader the front uses. Each file shows its size, mtime,
+md5 and how many of its three pieces are placed; a file on two pieces is
+marked until the background finishes it. The page is a snapshot, it does
+not poll.
 
 Config is JSON:
 
