@@ -33,7 +33,9 @@ that does not fit, which the load reports as an error on the write,
 evicts the least recently read copies until it does. A block on the
 HDD never changes, so a copy is good until it is evicted: a restart
 keeps them, the owner relearns what is there and takes the copy time
-as the order, since that is all it can know. No index, no checksum;
+as the order, since that is all it can know. A copy of a block the log
+has not reached is not a copy of anything, only a log that started
+over could leave one, and the owner drops it. No index, no checksum;
 the bytes are the front's to interpret.
 
 A cell that runs out of space starts, does not open its port and exits.

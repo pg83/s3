@@ -99,10 +99,13 @@ c.close()
 if cell.stop() != 0:
     lib.fail("cell did not exit cleanly on SIGTERM")
 
+with open(os.path.join(cell.load, "7"), "wb") as f:
+    f.write(b"a copy of a block the log never wrote")
+
 cell.start()
 
 if os.listdir(cell.load) != ["0"]:
-    lib.fail(f"restart dropped the load copies: {os.listdir(cell.load)}")
+    lib.fail(f"restart did not keep exactly the valid copy: {os.listdir(cell.load)}")
 c = cell.client()
 head, free = c.status()
 

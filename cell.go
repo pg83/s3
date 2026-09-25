@@ -391,7 +391,13 @@ func (c *Cell) warm(l *loaded) {
 	sort.Slice(copies, func(i, j int) bool { return copies[i].ModTime().Before(copies[j].ModTime()) })
 
 	for _, info := range copies {
-		num := throw2(strconv.ParseInt(info.Name(), 10, 64))
+		num, err := strconv.ParseInt(info.Name(), 10, 64)
+
+		if err != nil || num >= c.num {
+			throw(os.Remove(filepath.Join(c.load, info.Name())))
+
+			continue
+		}
 
 		l.byNum[num] = l.order.PushFront(num)
 	}
