@@ -13,6 +13,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"container/list"
 )
@@ -27,6 +28,7 @@ const (
 	tick         = 100 * time.Millisecond
 	minFree      = 1 << 20
 	maxFrameSize = 1 << 31
+	ioAlign      = 4096
 )
 
 type WriteReq struct {
@@ -102,7 +104,7 @@ func openCell(load, store, hdd string) *Cell {
 		throw(os.MkdirAll(d, 0o755))
 	}
 
-	dev := throw2(os.OpenFile(hdd, os.O_RDWR, 0))
+	dev := throw2(os.OpenFile(hdd, os.O_RDWR|syscall.O_DIRECT, 0))
 
 	c := &Cell{
 		load:     load,
@@ -275,16 +277,27 @@ func (c *Cell) put(data []byte) (int64, error) {
 	return offset, nil
 }
 
+func alignedBlock() []byte {
+	raw := make([]byte, blockSize+ioAlign)
+	skew := int(uintptr(unsafe.Pointer(&raw[0])) % ioAlign)
+
+	if skew != 0 {
+		skew = ioAlign - skew
+	}
+
+	return raw[skew : skew+blockSize]
+}
+
 func (c *Cell) flusher() {
+	buf := alignedBlock()
+
 	for {
-		c.flush()
+		c.flush(buf)
 		<-c.ready
 	}
 }
 
-func (c *Cell) flush() {
-	buf := make([]byte, blockSize)
-
+func (c *Cell) flush(buf []byte) {
 	for _, num := range blockNumbers(filepath.Join(c.store, "ready"), "") {
 		f := throw2(os.Open(c.readyPath(num)))
 
@@ -342,6 +355,7 @@ type loaded struct {
 
 func (c *Cell) loader() {
 	l := &loaded{order: list.New(), byNum: map[int64]*list.Element{}}
+	buf := alignedBlock()
 
 	c.warm(l)
 
@@ -349,7 +363,7 @@ func (c *Cell) loader() {
 		var resp ReadResp
 
 		try(func() {
-			resp.f = c.open(l, req.num)
+			resp.f = c.open(l, buf, req.num)
 		}).catch(func(exc *Exception) {
 			resp.err = exc.asError()
 		})
@@ -382,7 +396,7 @@ func (c *Cell) warm(l *loaded) {
 	}
 }
 
-func (c *Cell) open(l *loaded, num int64) *os.File {
+func (c *Cell) open(l *loaded, buf []byte, num int64) *os.File {
 	if e, ok := l.byNum[num]; ok {
 		if f, err := os.Open(c.loadPath(num)); err == nil {
 			l.order.MoveToFront(e)
@@ -401,8 +415,6 @@ func (c *Cell) open(l *loaded, num int64) *os.File {
 	if f, err := os.Open(c.readyPath(num)); err == nil {
 		return f
 	}
-
-	buf := make([]byte, blockSize)
 
 	throw2(c.hdd.ReadAt(buf, num*blockSize))
 
