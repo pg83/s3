@@ -85,6 +85,35 @@ status, _, _ = s3.request("GET", "/photos/tiny", headers={"Range": "bytes=5-9"})
 if status != 416:
     lib.fail(f"bad range: {status}")
 
+# many requests in flight on the same cell connections
+import threading
+
+s3.request("PUT", "/burst")
+burst = {f"{i:02d}": os.urandom(MB + i) for i in range(16)}
+failures = []
+
+def put_get(key, data):
+    status, headers, _ = s3.request("PUT", "/burst/" + key, data)
+    if status != 200 or headers.get("etag") != '"' + lib.md5(data) + '"':
+        failures.append(f"put {key}: {status}")
+        return
+    status, _, body = s3.request("GET", "/burst/" + key)
+    if status != 200 or body != data:
+        failures.append(f"get {key}: {status} {len(body)}")
+
+threads = [threading.Thread(target=put_get, args=item) for item in burst.items()]
+for th in threads:
+    th.start()
+for th in threads:
+    th.join()
+if failures:
+    lib.fail(f"burst: {failures}")
+
+for key in burst:
+    m = etcd.manifest("burst", key)
+    if len(m["pieces"]) != 3:
+        lib.fail(f"burst {key} landed on {len(m['pieces'])} pieces")
+
 # listing
 def listing(query):
     status, _, body = s3.request("GET", "/photos?" + query)

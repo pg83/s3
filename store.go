@@ -33,14 +33,15 @@ type Manifest struct {
 }
 
 type Store struct {
-	etcd   *Etcd
-	hosts  []string
-	byHost map[string][]CellSpec
-	byId   map[int]CellSpec
+	etcd    *Etcd
+	hosts   []string
+	byHost  map[string][]CellSpec
+	byId    map[int]CellSpec
+	clients map[int]*CellClient
 }
 
 func newStore(cfg *Config) *Store {
-	s := &Store{etcd: newEtcd(cfg.Etcd), byHost: map[string][]CellSpec{}, byId: map[int]CellSpec{}}
+	s := &Store{etcd: newEtcd(cfg.Etcd), byHost: map[string][]CellSpec{}, byId: map[int]CellSpec{}, clients: map[int]*CellClient{}}
 
 	for _, c := range cfg.Cells {
 		if _, seen := s.byHost[c.Host]; !seen {
@@ -49,6 +50,7 @@ func newStore(cfg *Config) *Store {
 
 		s.byHost[c.Host] = append(s.byHost[c.Host], c)
 		s.byId[c.Id] = c
+		s.clients[c.Id] = newCellClient(c.Addr)
 	}
 
 	sort.Strings(s.hosts)
@@ -136,11 +138,7 @@ func (s *Store) appendTo(cells []CellSpec, data []byte) (Piece, bool) {
 		var err error
 
 		exc := try(func() {
-			cl := dialCell(c.Addr)
-
-			defer cl.close()
-
-			offset, err = cl.append(data)
+			offset, err = s.clients[c.Id].append(data)
 		})
 
 		if exc != nil {
@@ -215,9 +213,7 @@ func (s *Store) manifest(bucket, key string) (Manifest, int64, error) {
 }
 
 func (s *Store) fetch(p Piece, n int64) ([]byte, bool) {
-	c, known := s.byId[p.Cell]
-
-	if !known {
+	if _, known := s.byId[p.Cell]; !known {
 		return nil, false
 	}
 
@@ -225,11 +221,7 @@ func (s *Store) fetch(p Piece, n int64) ([]byte, bool) {
 	var err error
 
 	exc := try(func() {
-		cl := dialCell(c.Addr)
-
-		defer cl.close()
-
-		data, err = cl.read(p.Offset, n)
+		data, err = s.clients[p.Cell].read(p.Offset, n)
 	})
 
 	if exc != nil || err != nil {

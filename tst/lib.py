@@ -16,7 +16,8 @@ import time
 BINARY = os.environ.get("S3_TEST_BINARY") or os.path.join(os.path.dirname(__file__), "..", "s3")
 
 OP_APPEND, OP_READ, OP_STATUS = 1, 2, 3
-ST_OK, ST_FULL, ST_RANGE, ST_IO = 0, 1, 2, 3
+OP_REPLY, OP_FAIL = 0x80, 0xff
+CODE_FULL, CODE_RANGE, CODE_IO = 1, 2, 3
 
 
 def run(*args, check=False):
@@ -94,16 +95,29 @@ class Cell:
 class Client:
     def __init__(self, port):
         self.sock = socket.create_connection(("127.0.0.1", port))
+        self.next_id = 0
 
     def close(self):
         self.sock.close()
 
     def call(self, op, payload=b""):
-        self.sock.sendall(struct.pack(">BI", op, len(payload)) + payload)
-        hdr = self._recv(5)
-        status, n = struct.unpack(">BI", hdr)
+        self.next_id += 1
+        body = struct.pack(">BQ", op, self.next_id) + payload
+        self.sock.sendall(struct.pack(">I", len(body)) + body)
+        n, = struct.unpack(">I", self._recv(4))
+        reply = self._recv(n)
+        rop, rid = struct.unpack(">BQ", reply[:9])
 
-        return status, self._recv(n)
+        if rid != self.next_id:
+            fail(f"reply id {rid} for request {self.next_id}")
+
+        if rop == OP_FAIL:
+            return OP_FAIL, reply[9]
+
+        if rop != op | OP_REPLY:
+            fail(f"op {op} answered with op {rop}")
+
+        return rop, reply[9:]
 
     def _recv(self, n):
         buf = bytearray()
@@ -119,32 +133,32 @@ class Client:
         return bytes(buf)
 
     def append(self, data):
-        status, resp = self.call(OP_APPEND, data)
+        op, resp = self.call(OP_APPEND, data)
 
-        if status == ST_FULL:
+        if op == OP_FAIL and resp == CODE_FULL:
             return None
 
-        if status != ST_OK:
-            fail(f"append status {status}")
+        if op == OP_FAIL:
+            fail(f"append failed with code {resp}")
 
         return struct.unpack(">Q", resp)[0]
 
     def read(self, off, n):
-        status, resp = self.call(OP_READ, struct.pack(">QI", off, n))
+        op, resp = self.call(OP_READ, struct.pack(">QI", off, n))
 
-        if status == ST_RANGE:
+        if op == OP_FAIL and resp == CODE_RANGE:
             return None
 
-        if status != ST_OK:
-            fail(f"read status {status}")
+        if op == OP_FAIL:
+            fail(f"read failed with code {resp}")
 
         return resp
 
     def status(self):
-        status, resp = self.call(OP_STATUS)
+        op, resp = self.call(OP_STATUS)
 
-        if status != ST_OK:
-            fail(f"status status {status}")
+        if op == OP_FAIL:
+            fail(f"status failed with code {resp}")
 
         return struct.unpack(">QQ", resp)
 

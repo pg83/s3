@@ -108,19 +108,32 @@ NotImplemented rather than with a listing that happens to share the URL.
 
 ## Transport
 
-TCP, one persistent connection per front-cell pair, requests and
-responses strictly in turn, no multiplexing:
+TCP, one connection per process-cell pair, opened on first use and
+kept; requests are multiplexed on it and answered in whatever order
+the cell finishes them. A frame is a length, an op and a body whose
+layout the op decides; every op so far starts its body with a request
+id that the reply carries back:
 
 ```
-request:  op u8 | len u32 | payload
-response: status u8 | len u32 | payload
+frame:   len u32 | op u8 | body            len counts op and body
 
-op 1 append   payload = data                 -> offset u64
-op 2 read     payload = offset u64, len u32  -> data
-op 3 status                                  -> head u64, free u64
+1 append     id u64 | data                 -> 0x81  id | offset u64
+2 read       id u64 | offset u64 | n u32   -> 0x82  id | data
+3 status     id u64                        -> 0x83  id | head u64, free u64
+                                           -> 0xff  id | code u8
 
-status: 0 ok, 1 full, 2 past the head, 3 io error
+code: 1 full, 2 past the head, 3 io error
 ```
+
+On the client one goroutine owns the connection: it takes requests
+from a channel, numbers them, remembers the reply channel by id and
+writes the frame; a reader goroutine turns the socket into a channel of
+frames, and the owner hands each reply to the goroutine waiting on that
+id. A lost connection fails everything in flight and is redialed by the
+next request; a reply that never comes fails after a minute. Nothing is
+shared, nothing is locked. On the cell every frame is handled in its
+own goroutine, so appends from one connection land in one tick and one
+fsync, and a writer goroutine serializes the replies.
 
 Cells and fronts talk over the storage network, which is private; there
 is no authentication and no encryption on this link. The code speaks

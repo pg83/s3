@@ -27,13 +27,6 @@ const (
 	lruBudget    = 1 << 30
 	lruSweep     = 10 * time.Second
 	minFree      = 1 << 20
-	statusOk     = 0
-	statusFull   = 1
-	statusRange  = 2
-	statusIo     = 3
-	opAppend     = 1
-	opRead       = 2
-	opStatus     = 3
 	maxFrameSize = 1 << 31
 )
 
@@ -90,13 +83,7 @@ func runCell(listen, ssd, hdd string) {
 	for {
 		conn := throw2(ln.Accept())
 
-		go func() {
-			try(func() {
-				c.serve(conn)
-			}).catch(func(exc *Exception) {
-				slog.Warn("cell: connection", "peer", conn.RemoteAddr(), "err", exc.error())
-			})
-		}()
+		go c.serve(conn)
 	}
 }
 
