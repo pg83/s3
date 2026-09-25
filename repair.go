@@ -14,7 +14,6 @@ import (
 type Repairer struct {
 	store *Store
 	host  string
-	local []CellSpec
 }
 
 func runRepair(cfg *Config, host string) {
@@ -35,7 +34,7 @@ func runRepair(cfg *Config, host string) {
 		}
 	}
 
-	r := &Repairer{store: s, host: host, local: local}
+	r := &Repairer{store: s, host: host}
 
 	slog.Info("repair: watching the queue", "host", host, "cells", len(local))
 
@@ -111,13 +110,11 @@ func (r *Repairer) fix(bucket, key string) {
 		throwFmt("repair: %s/%s: the other two pieces do not rebuild the md5", bucket, key)
 	}
 
-	p, ok := r.store.appendTo(r.local, have[mine])
+	p, ok := r.store.place(map[int][]byte{mine: have[mine]}, map[int]string{mine: r.host})[mine]
 
 	if !ok {
 		throwFmt("repair: %s/%s: no cell of %s took the piece", bucket, key, r.host)
 	}
-
-	p.Piece = mine
 
 	pieces := []Piece{p}
 

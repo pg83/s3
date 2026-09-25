@@ -129,30 +129,65 @@ func (s *Store) hostOrder(key string) []string {
 	return order
 }
 
-func (s *Store) appendTo(cells []CellSpec, data []byte) (Piece, bool) {
-	cells = append([]CellSpec(nil), cells...)
+type placing struct {
+	host  string
+	cells []CellSpec
+	cell  int
+}
 
-	rand.Shuffle(len(cells), func(i, j int) { cells[i], cells[j] = cells[j], cells[i] })
+func (s *Store) place(pieces map[int][]byte, hosts map[int]string) map[int]Piece {
+	reply := make(chan outcome, len(pieces)*len(s.byId))
+	plan := map[int]*placing{}
+	placed := map[int]Piece{}
+	pending := 0
 
-	for _, c := range cells {
-		reply := make(chan outcome, 1)
+	offer := func(i int) bool {
+		p := plan[i]
 
-		s.links[c.Id].send(c.Id, opAppend, data, reply)
-
-		offset, err := appended(<-reply)
-
-		if err == nil {
-			return Piece{Cell: c.Id, Offset: offset}, true
+		if len(p.cells) == 0 {
+			return false
 		}
 
-		slog.Warn("store: append", "cell", c.Id, "err", err)
+		p.cell, p.cells = p.cells[0].Id, p.cells[1:]
 
-		if !errors.Is(err, errFull) {
-			return Piece{}, false
+		s.links[p.cell].send(i, opAppend, pieces[i], reply)
+
+		return true
+	}
+
+	for i, host := range hosts {
+		cells := append([]CellSpec(nil), s.byHost[host]...)
+
+		rand.Shuffle(len(cells), func(a, b int) { cells[a], cells[b] = cells[b], cells[a] })
+
+		plan[i] = &placing{host: host, cells: cells}
+
+		if offer(i) {
+			pending++
 		}
 	}
 
-	return Piece{}, false
+	for pending > 0 {
+		o := <-reply
+
+		pending--
+
+		offset, err := appended(o)
+
+		if err == nil {
+			placed[o.tag] = Piece{Cell: plan[o.tag].cell, Offset: offset, Piece: o.tag}
+
+			continue
+		}
+
+		slog.Warn("store: append", "cell", plan[o.tag].cell, "err", err)
+
+		if errors.Is(err, errFull) && offer(o.tag) {
+			pending++
+		}
+	}
+
+	return placed
 }
 
 func (s *Store) put(bucket, key string, data []byte, contentType string) (Manifest, error) {
@@ -162,35 +197,25 @@ func (s *Store) put(bucket, key string, data []byte, contentType string) (Manife
 
 	if len(data) > 0 {
 		pieces := split(data)
-		order := s.hostOrder(key)
-		placed := make(chan Piece, len(order))
+		hosts := map[int]string{}
+		want := map[int][]byte{}
 
-		for i, host := range order {
-			go func() {
-				p, ok := s.appendTo(s.byHost[host], pieces[i])
-
-				if !ok {
-					p.Cell = -1
-				}
-
-				p.Piece = i
-				placed <- p
-			}()
+		for i, host := range s.hostOrder(key) {
+			hosts[i] = host
+			want[i] = pieces[i]
 		}
 
-		for range order {
-			p := <-placed
+		placed := s.place(want, hosts)
 
-			if p.Cell < 0 {
-				owing = append(owing, order[p.Piece])
+		for i := range 3 {
+			if p, ok := placed[i]; ok {
+				m.Pieces = append(m.Pieces, p)
 
 				continue
 			}
 
-			m.Pieces = append(m.Pieces, p)
+			owing = append(owing, hosts[i])
 		}
-
-		sort.Slice(m.Pieces, func(i, j int) bool { return m.Pieces[i].Piece < m.Pieces[j].Piece })
 
 		if len(m.Pieces) < 2 {
 			return m, errTooFewCells
@@ -224,43 +249,34 @@ func (s *Store) manifest(bucket, key string) (Manifest, int64, error) {
 	return m, entry.rev, nil
 }
 
-func (s *Store) fetch(p Piece, n int64) ([]byte, bool) {
-	if _, known := s.byId[p.Cell]; !known {
-		return nil, false
-	}
-
-	body := binary.BigEndian.AppendUint64(nil, uint64(p.Offset))
-	reply := make(chan outcome, 1)
-
-	s.links[p.Cell].send(p.Cell, opRead, binary.BigEndian.AppendUint32(body, uint32(n)), reply)
-
-	data, err := readOut(<-reply)
-
-	if err != nil {
-		slog.Warn("store: read", "cell", p.Cell, "offset", p.Offset, "err", err)
-
-		return nil, false
-	}
-
-	return data, true
-}
-
 func (s *Store) fetchAll(pieces []Piece, n int64) [3][]byte {
-	got := make(chan Piece, len(pieces))
+	reply := make(chan outcome, len(pieces))
 	have := [3][]byte{}
-	data := make([][]byte, 3)
+	sent := 0
 
 	for _, p := range pieces {
-		go func() {
-			data[p.Piece], _ = s.fetch(p, n)
-			got <- p
-		}()
+		if _, known := s.byId[p.Cell]; !known {
+			continue
+		}
+
+		body := binary.BigEndian.AppendUint64(nil, uint64(p.Offset))
+
+		s.links[p.Cell].send(p.Piece, opRead, binary.BigEndian.AppendUint32(body, uint32(n)), reply)
+
+		sent++
 	}
 
-	for range pieces {
-		p := <-got
+	for range sent {
+		o := <-reply
+		data, err := readOut(o)
 
-		have[p.Piece] = data[p.Piece]
+		if err != nil {
+			slog.Warn("store: read", "piece", o.tag, "err", err)
+
+			continue
+		}
+
+		have[o.tag] = data
 	}
 
 	return have
@@ -296,7 +312,7 @@ func (s *Store) get(bucket, key string, m Manifest) ([]byte, error) {
 	}
 
 	if p, ok := byIndex[2]; ok {
-		have[2], _ = s.fetch(p, n)
+		have[2] = s.fetchAll([]Piece{p}, n)[2]
 	}
 
 	if have[2] != nil {
