@@ -149,5 +149,6 @@ object.
 ## Build and test
 
 `./build` builds `.build/bin/s3` and publishes `./s3`. `./build test`
-runs the end-to-end suite in `tst/`. See `STYLE.md` for the code style
+runs the end-to-end suite in `tst/`; the S3 scenario needs an etcd
+binary, `S3_TEST_ETCD=/path/to/etcd` or `etcd` on PATH. See `STYLE.md` for the code style
 and `CLAUDE.md` for the working conventions.

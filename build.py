@@ -61,6 +61,7 @@ for test_path in build.glob("$(S)/tst/test_*.py"):
     env = {
         "S3_TEST_BINARY": s3.outputs[0],
         "S3_TEST_ARTIFACTS": os.environ.get("S3_TEST_ARTIFACTS", ""),
+        "S3_TEST_ETCD": os.environ.get("S3_TEST_ETCD", ""),
         "PYTHONDONTWRITEBYTECODE": "1",
     }
 

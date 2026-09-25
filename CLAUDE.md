@@ -18,6 +18,8 @@ it back without being asked.
   scripts driving the real binary as local processes. Tests are e2e
   only; do not add Go unit tests.
 - `./build -Drace test` runs the same suite with the race detector.
+- `tst/test_s3.py` needs an etcd server binary: `S3_TEST_ETCD=/path/to/etcd`,
+  or `etcd` on PATH; without one the scenario skips.
 - Dependencies are pinned in `go.mod` and `go.sum`; no vendor directory.
 - `./lint.sh` before committing style-sensitive changes; it strips every
   comment that is not a compiler directive. What code does belongs in its

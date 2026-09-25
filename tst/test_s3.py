@@ -1,0 +1,202 @@
+"""The S3 front over nine cells on three hosts and one etcd: buckets,
+objects of every size, listing with prefixes and delimiters, ranges,
+deletes; a host down at write time leaves two pieces and the background
+adds the third; a host down at read time and a corrupt piece are both
+served through the parity."""
+
+import http.client
+import json
+import os
+import time
+import xml.etree.ElementTree as ET
+
+import lib
+
+MB = 1 << 20
+NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+
+etcd = lib.Etcd()
+
+if etcd is None:
+    print("skip: no etcd binary (set S3_TEST_ETCD)")
+    raise SystemExit(0)
+
+etcd.start()
+cluster = lib.Cluster(etcd, hosts=3, cells=3, hdd_bytes=64 * MB).start()
+s3 = cluster.s3()
+
+# buckets
+status, _, _ = s3.request("PUT", "/photos")
+if status != 200:
+    lib.fail(f"create bucket: {status}")
+
+status, _, _ = s3.request("PUT", "/photos")
+if status != 409:
+    lib.fail(f"create bucket twice: {status}")
+
+status, _, body = s3.request("GET", "/")
+names = [b.find(NS + "Name").text for b in ET.fromstring(body).iter(NS + "Bucket")]
+if status != 200 or names != ["photos"]:
+    lib.fail(f"list buckets: {status} {names}")
+
+status, _, _ = s3.request("HEAD", "/nope")
+if status != 404:
+    lib.fail(f"head missing bucket: {status}")
+
+# objects of every size
+blobs = {
+    "empty": b"",
+    "tiny": b"a",
+    "odd": os.urandom(12345),
+    "dir/a.txt": b"hello",
+    "dir/b.txt": b"world",
+    "dir/sub/c.txt": b"deep",
+    "big": os.urandom(5 * MB + 17),
+}
+
+for key, data in blobs.items():
+    status, headers, _ = s3.request("PUT", "/photos/" + key, data, {"Content-Type": "text/plain"})
+    if status != 200 or headers.get("etag") != '"' + lib.md5(data) + '"':
+        lib.fail(f"put {key}: {status} {headers.get('etag')}")
+
+for key, data in blobs.items():
+    status, headers, body = s3.request("GET", "/photos/" + key)
+    if status != 200 or body != data or headers.get("etag") != '"' + lib.md5(data) + '"' or headers.get("content-type") != "text/plain":
+        lib.fail(f"get {key}: {status} len={len(body)} {headers.get('etag')} {headers.get('content-type')}")
+
+    status, headers, _ = s3.request("HEAD", "/photos/" + key)
+    if status != 200 or int(headers["content-length"]) != len(data):
+        lib.fail(f"head {key}: {status} {headers.get('content-length')}")
+
+status, _, _ = s3.request("GET", "/photos/nope")
+if status != 404:
+    lib.fail(f"get missing: {status}")
+
+# ranges
+status, headers, body = s3.request("GET", "/photos/big", headers={"Range": "bytes=100-199"})
+if status != 206 or body != blobs["big"][100:200] or headers.get("content-range") != f"bytes 100-199/{len(blobs['big'])}":
+    lib.fail(f"range: {status} {len(body)} {headers.get('content-range')}")
+
+status, _, body = s3.request("GET", "/photos/big", headers={"Range": "bytes=-5"})
+if status != 206 or body != blobs["big"][-5:]:
+    lib.fail(f"suffix range: {status} {body!r}")
+
+status, _, _ = s3.request("GET", "/photos/tiny", headers={"Range": "bytes=5-9"})
+if status != 416:
+    lib.fail(f"bad range: {status}")
+
+# listing
+def listing(query):
+    status, _, body = s3.request("GET", "/photos?" + query)
+    if status != 200:
+        lib.fail(f"list {query}: {status}")
+    root = ET.fromstring(body)
+    keys = [c.find(NS + "Key").text for c in root.iter(NS + "Contents")]
+    prefixes = [c.find(NS + "Prefix").text for c in root.iter(NS + "CommonPrefixes")]
+    truncated = root.find(NS + "IsTruncated").text == "true"
+    token = root.find(NS + "NextContinuationToken")
+    return keys, prefixes, truncated, None if token is None else token.text
+
+keys, prefixes, truncated, _ = listing("list-type=2")
+if keys != sorted(blobs) or prefixes or truncated:
+    lib.fail(f"list all: {keys} {prefixes} {truncated}")
+
+keys, prefixes, _, _ = listing("list-type=2&delimiter=/")
+if keys != ["big", "empty", "odd", "tiny"] or prefixes != ["dir/"]:
+    lib.fail(f"list delimited: {keys} {prefixes}")
+
+keys, prefixes, _, _ = listing("list-type=2&delimiter=/&prefix=dir/")
+if keys != ["dir/a.txt", "dir/b.txt"] or prefixes != ["dir/sub/"]:
+    lib.fail(f"list prefix: {keys} {prefixes}")
+
+keys, _, truncated, token = listing("list-type=2&max-keys=3")
+if keys != ["big", "dir/a.txt", "dir/b.txt"] or not truncated or not token:
+    lib.fail(f"list page 1: {keys} {truncated} {token}")
+
+keys, _, truncated, _ = listing("list-type=2&max-keys=3&continuation-token=" + token)
+if keys != ["dir/sub/c.txt", "empty", "odd"] or not truncated:
+    lib.fail(f"list page 2: {keys} {truncated}")
+
+keys, _, _, _ = listing("prefix=dir/&marker=dir/a.txt")
+if keys != ["dir/b.txt", "dir/sub/c.txt"]:
+    lib.fail(f"list v1 marker: {keys}")
+
+# delete
+status, _, _ = s3.request("DELETE", "/photos/dir/a.txt")
+if status != 204:
+    lib.fail(f"delete: {status}")
+
+status, _, _ = s3.request("GET", "/photos/dir/a.txt")
+if status != 404:
+    lib.fail(f"get deleted: {status}")
+
+status, _, _ = s3.request("DELETE", "/photos")
+if status != 409:
+    lib.fail(f"delete non-empty bucket: {status}")
+
+# a host down at write time: two pieces, then the background adds the third
+cluster.host(2).stop()
+status, _, _ = s3.request("PUT", "/photos/degraded", blobs["odd"])
+if status != 200:
+    lib.fail(f"put with a host down: {status}")
+
+m = etcd.manifest("photos", "degraded")
+if len(m["pieces"]) != 2 or not etcd.has("repair/photos/degraded"):
+    lib.fail(f"degraded manifest: {m} repair={etcd.has('repair/photos/degraded')}")
+
+status, _, body = s3.request("GET", "/photos/degraded")
+if status != 200 or body != blobs["odd"]:
+    lib.fail(f"get degraded: {status}")
+
+cluster.host(2).start()
+cluster.background()
+
+deadline = time.time() + 30
+while time.time() < deadline and len(etcd.manifest("photos", "degraded")["pieces"]) < 3:
+    time.sleep(0.5)
+
+m = etcd.manifest("photos", "degraded")
+if len(m["pieces"]) != 3 or etcd.has("repair/photos/degraded"):
+    lib.fail(f"repaired manifest: {m} repair={etcd.has('repair/photos/degraded')}")
+
+if sorted(cluster.host_of(p["cell"]) for p in m["pieces"]) != [0, 1, 2]:
+    lib.fail(f"pieces are not on three hosts: {m}")
+
+# a host down at read time: the parity fills in
+for key in ("big", "odd", "tiny"):
+    m = etcd.manifest("photos", key)
+    down = cluster.host_of(next(p["cell"] for p in m["pieces"] if p["piece"] == 0))
+    cluster.host(down).stop()
+    status, _, body = s3.request("GET", "/photos/" + key)
+    cluster.host(down).start()
+    if status != 200 or body != blobs[key]:
+        lib.fail(f"get {key} with host {down} down: {status} {len(body)}")
+
+# a corrupt piece: the parity rebuilds it, the key is queued for repair
+m = etcd.manifest("photos", "odd")
+p = next(p for p in m["pieces"] if p["piece"] == 1)
+cluster.corrupt(p["cell"], p["offset"], 16)
+status, _, body = s3.request("GET", "/photos/odd")
+if status != 200 or body != blobs["odd"]:
+    lib.fail(f"get with a corrupt piece: {status}")
+
+if not etcd.has("repair/photos/odd"):
+    lib.fail("corrupt piece was not queued for repair")
+
+deadline = time.time() + 30
+while time.time() < deadline and etcd.has("repair/photos/odd"):
+    time.sleep(0.5)
+
+if etcd.has("repair/photos/odd"):
+    lib.fail("corrupt piece was not repaired")
+
+m2 = etcd.manifest("photos", "odd")
+if m2["pieces"] == m["pieces"]:
+    lib.fail("repair did not move the corrupt piece")
+
+cluster.clear_lru()
+status, _, body = s3.request("GET", "/photos/odd")
+if status != 200 or body != blobs["odd"]:
+    lib.fail(f"get after repair: {status}")
+
+print("ok")

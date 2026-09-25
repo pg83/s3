@@ -30,6 +30,7 @@ jobs:
           sudo apt-get update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y etcd-server etcd-client
           echo "S3_TEST_ARTIFACTS=$RUNNER_TEMP/s3-artifacts" >> "$GITHUB_ENV"
+          echo "S3_TEST_ETCD=/usr/bin/etcd" >> "$GITHUB_ENV"
 
       - name: Format
         run: test -z "$(gofmt -l *.go)" || { gofmt -d *.go; exit 1; }
