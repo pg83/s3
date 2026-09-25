@@ -66,11 +66,12 @@ nothing about objects, and no table maps ids to disks.
 
 The front reads the whole body into memory, a bounded number of bodies
 at a time so that clients past that wait in their own sockets,
-computing its md5 on the way, then appends the three pieces to their
-three hosts at once, each
-into a cell of its host picked at random; a cell that is full sends the
-piece to the next cell of the same host, a host whose cell is down is
-left owing the piece. Nothing is retried: the outcome of every append
+sends the two halves to their hosts the moment it has them, then the
+parity, and computes the md5 for the key while the cells think, so
+neither the hash nor the XOR sits in front of the sends. Each piece
+goes into a cell of its host picked at random; a cell that is full
+sends the piece to the next cell of the same host, a host whose cell is
+down is left owing the piece. Nothing is retried: the outcome of every append
 is known, and the client above retries the whole request if too little
 of it landed.
 

@@ -90,14 +90,13 @@ func xor(a, b []byte) []byte {
 	return out
 }
 
-func split(data []byte) [3][]byte {
+func halves(data []byte) ([]byte, []byte) {
 	n := pieceLen(int64(len(data)))
-	d0 := data[:n]
 	d1 := make([]byte, n)
 
 	copy(d1, data[n:])
 
-	return [3][]byte{d0, d1, xor(d0, d1)}
+	return data[:n], d1
 }
 
 func assemble(d0, d1 []byte, size int64) []byte {
@@ -145,8 +144,8 @@ type placer struct {
 	pending int
 }
 
-func (s *Store) placer(pieces map[int][]byte, hosts map[int]string) *placer {
-	p := &placer{store: s, pieces: pieces, plan: map[int]*placing{}, placed: map[int]Piece{}, reply: make(chan outcome, len(pieces)*len(s.byId))}
+func (s *Store) newPlacer(hosts map[int]string) *placer {
+	p := &placer{store: s, pieces: map[int][]byte{}, plan: map[int]*placing{}, placed: map[int]Piece{}, reply: make(chan outcome, len(hosts)*len(s.byId))}
 
 	for i, host := range hosts {
 		cells := append([]CellSpec(nil), s.byHost[host]...)
@@ -154,13 +153,27 @@ func (s *Store) placer(pieces map[int][]byte, hosts map[int]string) *placer {
 		rand.Shuffle(len(cells), func(a, b int) { cells[a], cells[b] = cells[b], cells[a] })
 
 		p.plan[i] = &placing{host: host, cells: cells}
-
-		if p.offer(i) {
-			p.pending++
-		}
 	}
 
 	return p
+}
+
+func (s *Store) placer(pieces map[int][]byte, hosts map[int]string) *placer {
+	p := s.newPlacer(hosts)
+
+	for i, data := range pieces {
+		p.add(i, data)
+	}
+
+	return p
+}
+
+func (p *placer) add(i int, data []byte) {
+	p.pieces[i] = data
+
+	if p.offer(i) {
+		p.pending++
+	}
 }
 
 func (p *placer) offer(i int) bool {
@@ -225,24 +238,30 @@ func (p *placer) pieces3() []Piece {
 }
 
 func (s *Store) put(gone <-chan struct{}, bucket, key string, data []byte, contentType string) (Manifest, error) {
-	m := Manifest{Size: int64(len(data)), Md5: md5hex(data), Mtime: time.Now().UTC(), ContentType: contentType}
+	m := Manifest{Size: int64(len(data)), Mtime: time.Now().UTC(), ContentType: contentType}
 
 	if len(data) == 0 {
+		m.Md5 = md5hex(data)
+
 		s.etcd.put(objKey(bucket, key), throw2(json.Marshal(m)))
 
 		return m, nil
 	}
 
-	pieces := split(data)
 	hosts := map[int]string{}
-	want := map[int][]byte{}
 
 	for i, host := range s.hostOrder(key) {
 		hosts[i] = host
-		want[i] = pieces[i]
 	}
 
-	p := s.placer(want, hosts)
+	p := s.newPlacer(hosts)
+	d0, d1 := halves(data)
+
+	p.add(0, d0)
+	p.add(1, d1)
+	p.add(2, xor(d0, d1))
+
+	m.Md5 = md5hex(data)
 
 	if !p.wait(gone, 2) {
 		return m, errClientGone
