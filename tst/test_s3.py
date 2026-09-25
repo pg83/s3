@@ -244,4 +244,54 @@ status, _, body = s3.request("GET", "/photos/odd")
 if status != 200 or body != blobs["odd"]:
     lib.fail(f"get after repair: {status}")
 
+# bucket and object subresources answer for themselves, never with a listing
+for query, want, mark in (
+    ("policy", 404, b"NoSuchBucketPolicy"),
+    ("location", 200, b"LocationConstraint"),
+    ("versioning", 200, b"VersioningConfiguration"),
+    ("acl", 501, b"NotImplemented"),
+    ("versions", 501, b"NotImplemented"),
+):
+    status, _, body = s3.request("GET", "/photos?" + query)
+    if status != want or mark not in body or b"ListBucketResult" in body:
+        lib.fail(f"bucket ?{query}: {status} {body[:200]}")
+
+for method in ("PUT", "DELETE"):
+    status, _, _ = s3.request(method, "/photos?policy", b"{}")
+    if status != 501:
+        lib.fail(f"{method} bucket ?policy: {status}")
+
+status, _, _ = s3.request("HEAD", "/photos")
+if status != 200:
+    lib.fail("a subresource request touched the bucket itself")
+
+status, _, _ = s3.request("GET", "/nope?location")
+if status != 404:
+    lib.fail(f"subresource of a missing bucket: {status}")
+
+status, _, body = s3.request("GET", "/photos/odd?tagging")
+if status != 501 or b"NotImplemented" not in body:
+    lib.fail(f"object ?tagging: {status} {body[:200]}")
+
+# multi-object delete
+status, _, _ = s3.request("PUT", "/multi")
+for key in ("x", "y", "z"):
+    s3.request("PUT", "/multi/" + key, b"1")
+
+body = b"<Delete><Object><Key>x</Key></Object><Object><Key>nope</Key></Object></Delete>"
+status, _, out = s3.request("POST", "/multi?delete", body, {"Content-Type": "application/xml"})
+deleted = [d.find(NS + "Key").text for d in ET.fromstring(out).iter(NS + "Deleted")]
+if status != 200 or deleted != ["x", "nope"]:
+    lib.fail(f"multi delete: {status} {deleted} {out[:200]}")
+
+body = b'<Delete xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Quiet>true</Quiet><Object><Key>y</Key></Object></Delete>'
+status, _, out = s3.request("POST", "/multi?delete", body, {"Content-Type": "application/xml"})
+if status != 200 or list(ET.fromstring(out).iter(NS + "Deleted")):
+    lib.fail(f"quiet multi delete: {status} {out[:200]}")
+
+status, _, out = s3.request("GET", "/multi?list-type=2")
+left = [c.find(NS + "Key").text for c in ET.fromstring(out).iter(NS + "Contents")]
+if left != ["z"]:
+    lib.fail(f"after multi delete: {left}")
+
 print("ok")

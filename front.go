@@ -13,6 +13,15 @@ import (
 	"time"
 )
 
+var bucketSubresources = []string{
+	"accelerate", "acl", "analytics", "cors", "delete", "encryption", "intelligent-tiering", "inventory",
+	"lifecycle", "location", "logging", "metrics", "notification", "object-lock", "ownershipControls",
+	"policy", "policyStatus", "publicAccessBlock", "replication", "requestPayment", "tagging",
+	"versioning", "versions", "website",
+}
+
+var objectSubresources = []string{"acl", "attributes", "legal-hold", "retention", "select", "tagging", "torrent"}
+
 const (
 	listLimit = 1000
 	s3Time    = "2006-01-02T15:04:05.000Z"
@@ -84,6 +93,41 @@ type ListBucketResult struct {
 	NextMarker            string         `xml:"NextMarker,omitempty"`
 	Contents              []Object       `xml:"Contents"`
 	CommonPrefixes        []CommonPrefix `xml:"CommonPrefixes"`
+}
+
+type DeleteRequest struct {
+	XMLName xml.Name `xml:"Delete"`
+	Quiet   bool     `xml:"Quiet"`
+	Objects []struct {
+		Key string `xml:"Key"`
+	} `xml:"Object"`
+}
+
+type DeletedObject struct {
+	Key string `xml:"Key"`
+}
+
+type DeleteResult struct {
+	XMLName xml.Name        `xml:"http://s3.amazonaws.com/doc/2006-03-01/ DeleteResult"`
+	Deleted []DeletedObject `xml:"Deleted"`
+}
+
+type LocationConstraint struct {
+	XMLName xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ LocationConstraint"`
+}
+
+type VersioningConfiguration struct {
+	XMLName xml.Name `xml:"http://s3.amazonaws.com/doc/2006-03-01/ VersioningConfiguration"`
+}
+
+func subresource(q url.Values, names []string) string {
+	for _, name := range names {
+		if q.Has(name) {
+			return name
+		}
+	}
+
+	return ""
 }
 
 func writeXml(w http.ResponseWriter, status int, v any) {
@@ -159,6 +203,12 @@ func (f *Front) bucketExists(bucket string) bool {
 }
 
 func (f *Front) bucketOp(w http.ResponseWriter, r *http.Request, bucket string) {
+	if sub := subresource(r.URL.Query(), bucketSubresources); sub != "" {
+		f.bucketSub(w, r, bucket, sub)
+
+		return
+	}
+
 	switch r.Method {
 	case http.MethodPut:
 		if f.bucketExists(bucket) {
@@ -204,6 +254,54 @@ func (f *Front) bucketOp(w http.ResponseWriter, r *http.Request, bucket string) 
 	default:
 		s3Fail(w, http.StatusMethodNotAllowed, "MethodNotAllowed", r.Method, "/"+bucket)
 	}
+}
+
+func (f *Front) bucketSub(w http.ResponseWriter, r *http.Request, bucket, sub string) {
+	resource := "/" + bucket
+
+	if !f.bucketExists(bucket) {
+		s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", resource)
+
+		return
+	}
+
+	switch {
+	case sub == "delete" && r.Method == http.MethodPost:
+		f.deleteObjects(w, r, bucket)
+	case sub == "location" && r.Method == http.MethodGet:
+		writeXml(w, http.StatusOK, LocationConstraint{})
+	case sub == "versioning" && r.Method == http.MethodGet:
+		writeXml(w, http.StatusOK, VersioningConfiguration{})
+	case sub == "policy" && r.Method == http.MethodGet:
+		s3Fail(w, http.StatusNotFound, "NoSuchBucketPolicy", "the bucket has no policy", resource)
+	default:
+		s3Fail(w, http.StatusNotImplemented, "NotImplemented", sub+" is not implemented", resource)
+	}
+}
+
+func (f *Front) deleteObjects(w http.ResponseWriter, r *http.Request, bucket string) {
+	req := DeleteRequest{}
+
+	throw(xml.Unmarshal(readBody(r), &req))
+
+	if len(req.Objects) > listLimit {
+		s3Fail(w, http.StatusBadRequest, "MalformedXML", "at most 1000 keys per request", "/"+bucket)
+
+		return
+	}
+
+	out := DeleteResult{}
+
+	for _, o := range req.Objects {
+		f.store.etcd.del(objKey(bucket, o.Key))
+		f.store.etcd.del(repairKey(bucket, o.Key))
+
+		if !req.Quiet {
+			out.Deleted = append(out.Deleted, DeletedObject{Key: o.Key})
+		}
+	}
+
+	writeXml(w, http.StatusOK, out)
 }
 
 func (f *Front) listObjects(w http.ResponseWriter, r *http.Request, bucket string) {
@@ -278,6 +376,12 @@ func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key str
 
 	if !f.bucketExists(bucket) {
 		s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", resource)
+
+		return
+	}
+
+	if sub := subresource(r.URL.Query(), objectSubresources); sub != "" {
+		s3Fail(w, http.StatusNotImplemented, "NotImplemented", sub+" is not implemented", resource)
 
 		return
 	}

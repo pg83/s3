@@ -92,7 +92,11 @@ bkt/<bucket>            -> bucket settings
 
 Listing is a range scan over `obj/<bucket>/<prefix>`; a delimiter is a
 seek past each common prefix. Deleting an object deletes its key and
-touches no cell.
+touches no cell; `POST /<bucket>?delete` does that for up to a thousand
+keys at once. A bucket has no settings yet: `?location` and
+`?versioning` answer with an empty configuration, `?policy` with
+NoSuchBucketPolicy, and every other bucket or object subresource with
+NotImplemented rather than with a listing that happens to share the URL.
 
 ## Transport
 
@@ -149,7 +153,8 @@ Config is JSON:
 No compaction: a full cell is emptied and refilled. No scrub. No
 rebuild walk over etcd for a lost cell. No limits on object size or
 concurrent uploads. No range reads served without assembling the whole
-object.
+object. No multipart uploads, no server-side copy, no signatures
+checked, no CORS, no bucket policies, ACLs or versioning.
 
 ## Build and test
 
