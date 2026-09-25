@@ -53,6 +53,12 @@ def wait_port(port, timeout=10):
     fail(f"port {port} never opened")
 
 
+def ready_blocks(store):
+    """Full blocks still on the SSD, waiting for the flusher: plain numbers."""
+
+    return sorted(int(name) for name in os.listdir(store) if name.isdigit())
+
+
 class Cell:
     """One `s3 cell` process over a temp SSD dir and a sparse file as the HDD."""
 
@@ -313,7 +319,7 @@ class Cluster:
 
         cell = self.cell(cell_id)
         block = offset // (2 << 20)
-        current = os.path.join(cell.store, f"current.{block}")
+        current = os.path.join(cell.store, f"{block}.current")
 
         # the piece may still sit in the current block; push it out to the HDD
         if os.path.exists(current):
@@ -326,11 +332,11 @@ class Cluster:
 
         deadline = time.time() + 10
 
-        while time.time() < deadline and os.listdir(os.path.join(cell.store, "ready")):
+        while time.time() < deadline and ready_blocks(cell.store):
             time.sleep(0.1)
 
-        if os.listdir(os.path.join(cell.store, "ready")):
-            fail("the flusher never emptied ready/")
+        if ready_blocks(cell.store):
+            fail("the flusher never emptied the store")
 
         with open(cell.hdd, "r+b") as f:
             f.seek(offset)

@@ -100,7 +100,7 @@ func runCell(listen, load, store, hdd string) {
 }
 
 func openCell(load, store, hdd string) *Cell {
-	for _, d := range []string{load, store, filepath.Join(store, "ready")} {
+	for _, d := range []string{load, store} {
 		throw(os.MkdirAll(d, 0o755))
 	}
 
@@ -127,28 +127,30 @@ func openCell(load, store, hdd string) *Cell {
 }
 
 func (c *Cell) currentPath(num int64) string {
-	return filepath.Join(c.store, "current."+strconv.FormatInt(num, 10))
+	return filepath.Join(c.store, strconv.FormatInt(num, 10)+".current")
 }
 
 func (c *Cell) readyPath(num int64) string {
-	return filepath.Join(c.store, "ready", strconv.FormatInt(num, 10))
+	return filepath.Join(c.store, strconv.FormatInt(num, 10))
 }
 
 func (c *Cell) loadPath(num int64) string {
 	return filepath.Join(c.load, strconv.FormatInt(num, 10))
 }
 
-func blockNumbers(dir, prefix string) []int64 {
+func blockNumbers(dir, suffix string) []int64 {
 	var nums []int64
 
 	for _, entry := range throw2(os.ReadDir(dir)) {
 		name := entry.Name()
 
-		if !strings.HasPrefix(name, prefix) || strings.HasSuffix(name, ".tmp") {
+		if !strings.HasSuffix(name, suffix) {
 			continue
 		}
 
-		nums = append(nums, throw2(strconv.ParseInt(strings.TrimPrefix(name, prefix), 10, 64)))
+		if n, err := strconv.ParseInt(strings.TrimSuffix(name, suffix), 10, 64); err == nil {
+			nums = append(nums, n)
+		}
 	}
 
 	sort.Slice(nums, func(i, j int) bool { return nums[i] < nums[j] })
@@ -159,11 +161,11 @@ func blockNumbers(dir, prefix string) []int64 {
 func (c *Cell) lastBlock() int64 {
 	var num int64
 
-	for _, n := range blockNumbers(filepath.Join(c.store, "ready"), "") {
+	for _, n := range blockNumbers(c.store, "") {
 		num = max(num, n+1)
 	}
 
-	for _, n := range blockNumbers(c.store, "current.") {
+	for _, n := range blockNumbers(c.store, ".current") {
 		num = max(num, n)
 	}
 
@@ -190,7 +192,6 @@ func (c *Cell) roll() {
 	throw(c.current.Sync())
 	throw(c.current.Close())
 	throw(os.Rename(c.currentPath(c.num), c.readyPath(c.num)))
-	syncDir(filepath.Join(c.store, "ready"))
 
 	c.num++
 	c.openCurrent()
@@ -205,7 +206,7 @@ func (c *Cell) roll() {
 func (c *Cell) head() int64 {
 	var head int64
 
-	for _, n := range blockNumbers(c.store, "current.") {
+	for _, n := range blockNumbers(c.store, ".current") {
 		head = n*blockSize + throw2(os.Stat(c.currentPath(n))).Size()
 	}
 
@@ -298,7 +299,7 @@ func (c *Cell) flusher() {
 }
 
 func (c *Cell) flush(buf []byte) {
-	for _, num := range blockNumbers(filepath.Join(c.store, "ready"), "") {
+	for _, num := range blockNumbers(c.store, "") {
 		f := throw2(os.Open(c.readyPath(num)))
 
 		throw2(io.ReadFull(f, buf))
@@ -308,7 +309,7 @@ func (c *Cell) flush(buf []byte) {
 		throw(os.Remove(c.readyPath(num)))
 	}
 
-	syncDir(filepath.Join(c.store, "ready"))
+	syncDir(c.store)
 }
 
 func (c *Cell) read(off int64, n int64) ([]byte, error) {

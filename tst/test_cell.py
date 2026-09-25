@@ -38,14 +38,13 @@ if c.read(o2 + len(big) - 1, 2) is not None:
     lib.fail("read across the head must be refused")
 
 # block 0 is full and goes to the HDD; block 1 is current
-ready = os.path.join(cell.store, "ready")
 deadline = time.time() + 10
 
-while time.time() < deadline and (os.listdir(ready) or not os.path.exists(os.path.join(cell.store, "current.1"))):
+while time.time() < deadline and (lib.ready_blocks(cell.store) or not os.path.exists(os.path.join(cell.store, "1.current"))):
     time.sleep(0.1)
 
-if os.listdir(ready):
-    lib.fail(f"ready still holds {os.listdir(ready)}")
+if lib.ready_blocks(cell.store):
+    lib.fail(f"the store still holds full blocks {lib.ready_blocks(cell.store)}")
 
 log = small + big
 

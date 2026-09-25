@@ -38,12 +38,11 @@ for data in blocks:
     if c.append(data) is None:
         lib.fail("append refused")
 
-ready = os.path.join(cell.store, "ready")
 deadline = time.time() + 10
-while time.time() < deadline and os.listdir(ready):
+while time.time() < deadline and lib.ready_blocks(cell.store):
     time.sleep(0.1)
-if os.listdir(ready):
-    lib.fail(f"ready still holds {os.listdir(ready)}")
+if lib.ready_blocks(cell.store):
+    lib.fail(f"the store still holds full blocks {lib.ready_blocks(cell.store)}")
 
 
 def cached():
