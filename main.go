@@ -31,12 +31,13 @@ func main() {
 
 			throw(fs.Parse(os.Args[2:]))
 			runFront(loadConfig(*config), *listen)
-		case "background":
-			fs := flag.NewFlagSet("background", flag.ExitOnError)
+		case "repair":
+			fs := flag.NewFlagSet("repair", flag.ExitOnError)
 			config := fs.String("c", "", "config file")
+			host := fs.String("host", "", "name of this host in the config")
 
 			throw(fs.Parse(os.Args[2:]))
-			runBackground(loadConfig(*config))
+			runRepair(loadConfig(*config), *host)
 		case "web":
 			fs := flag.NewFlagSet("web", flag.ExitOnError)
 			config := fs.String("c", "", "config file")
@@ -60,7 +61,7 @@ func printUsage() {
 Commands:
   cell -listen addr -ssd dir -hdd device      append-only log on one disk
   front -c config.json -listen addr           S3 API over the cells and etcd
-  background -c config.json                   finish the writes that landed on two cells
+  repair -c config.json -host name            rebuild the pieces this host owes
   web -c config.json -listen addr             browse buckets and objects
 `)
 }

@@ -58,8 +58,9 @@ then `p`, each into the emptiest cell of its host. If the third append
 fails, the two halves of data are still there and reads need no XOR.
 
 Three appends landed: write the key and return. Two landed: write the
-key with two sources plus a `repair/` entry, and return. Fewer: fail;
-nothing is rolled back, the orphan pieces are garbage in their cells.
+key with two sources, then a `repair/<host>/` entry for the host that
+took nothing, and return. Fewer: fail; nothing is rolled back, the
+orphan pieces are garbage in their cells.
 
 The key in etcd is written only after the pieces are durable, so a
 reader never sees a pointer to bytes that are not there.
@@ -69,24 +70,31 @@ reader never sees a pointer to bytes that are not there.
 Fetch `d0` and `d1`, assemble, check the md5 kept in the key. On
 mismatch fetch `p` as well and try the three combinations until one
 matches; the piece the winning combination left out is the corrupt one,
-and the key goes to the repair queue. No combination matches: the
-object is lost.
+and the key goes to the repair queue of the host holding it. No
+combination matches: the object is lost.
 
 Range requests assemble the whole object and return the slice.
 
 ## Repair
 
-`s3 background` walks `repair/`: reads the two pieces, rebuilds the
-third, appends it to the host that has none, rewrites the key with three
-sources under a compare-and-swap on the etcd revision, drops the queue
-entry. A key that was overwritten or deleted meanwhile is skipped. A
-host that stays down keeps its keys at two sources until it returns.
+Every host runs `s3 repair -host <name>` over its own queue,
+`repair/<name>/`: an entry there means this host owes a piece of that
+key, either because it took nothing at write time or because a read
+found its piece corrupt. The handler reads what the key has, over the
+network for the other hosts' pieces; if all three are there and agree
+with the md5 and with each other the entry is stale and is dropped.
+Otherwise it rebuilds its own piece from the other two, appends it to
+one of its own cells, which it reaches over loopback only and refuses
+to run otherwise, rewrites the key under a compare-and-swap on the etcd
+revision and drops the entry. A key that was overwritten or deleted
+meanwhile is skipped. A host that stays down keeps its queue, and its
+keys at two sources, until it returns; nobody repairs on its behalf.
 
 ## Metadata
 
 ```
 obj/<bucket>/<key>      -> id, size, md5 (the ETag), mtime
-repair/<bucket>/<key>   -> waiting for a third piece
+repair/<host>/<bucket>/<key>   -> this host owes a piece
 bkt/<bucket>            -> bucket settings
 ```
 
@@ -124,7 +132,7 @@ protocol.
 ```
 s3 cell -listen addr -ssd dir -hdd device
 s3 front -c config.json -listen addr
-s3 background -c config.json
+s3 repair -c config.json -host name
 s3 web -c config.json -listen addr
 ```
 
@@ -133,8 +141,8 @@ walks a bucket folder by folder (the delimiter is `/`, 500 entries a
 page, `after=` continues), and `/o/<bucket>/<key>` fetches an object
 through the same reader the front uses. Each file shows its size, mtime,
 md5 and how many of its three pieces are placed; a file on two pieces is
-marked until the background finishes it. The page is a snapshot, it does
-not poll.
+marked until the repair of the host that owes it finishes. The page is
+a snapshot, it does not poll.
 
 Config is JSON:
 

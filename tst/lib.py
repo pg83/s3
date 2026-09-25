@@ -201,7 +201,7 @@ class Etcd:
         out = self.call("range", {"key": base64.b64encode(key.encode()).decode()})
 
         for kv in out.get("kvs", []):
-            return base64.b64decode(kv["value"])
+            return base64.b64decode(kv.get("value", ""))
 
         return None
 
@@ -234,7 +234,7 @@ class Host:
 
 
 class Cluster:
-    """Three hosts of cells, one front and, on request, one background."""
+    """Three hosts of cells, one front and, on request, a repair per host."""
 
     def __init__(self, etcd, hosts, cells, hdd_bytes):
         self.etcd = etcd
@@ -264,11 +264,12 @@ class Cluster:
 
         return self
 
-    def background(self):
-        self.procs.append(subprocess.Popen(
-            [BINARY, "background", "-c", self.config],
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-        ))
+    def repair(self):
+        for h in self.hosts:
+            self.procs.append(subprocess.Popen(
+                [BINARY, "repair", "-c", self.config, "-host", f"h{h.index}"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
+            ))
 
     def web(self):
         port = free_port()

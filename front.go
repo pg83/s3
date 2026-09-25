@@ -294,7 +294,6 @@ func (f *Front) deleteObjects(w http.ResponseWriter, r *http.Request, bucket str
 
 	for _, o := range req.Objects {
 		f.store.etcd.del(objKey(bucket, o.Key))
-		f.store.etcd.del(repairKey(bucket, o.Key))
 
 		if !req.Quiet {
 			out.Deleted = append(out.Deleted, DeletedObject{Key: o.Key})
@@ -471,7 +470,6 @@ func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key str
 		w.Write(data[start:end])
 	case http.MethodDelete:
 		f.store.etcd.del(objKey(bucket, key))
-		f.store.etcd.del(repairKey(bucket, key))
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		s3Fail(w, http.StatusMethodNotAllowed, "MethodNotAllowed", r.Method, resource)

@@ -32,10 +32,6 @@ type Manifest struct {
 	Pieces      []Piece   `json:"pieces"`
 }
 
-type Repair struct {
-	Bad int `json:"bad"`
-}
-
 type Store struct {
 	etcd   *Etcd
 	hosts  []string
@@ -68,8 +64,8 @@ func objKey(bucket, key string) string {
 	return "obj/" + bucket + "/" + key
 }
 
-func repairKey(bucket, key string) string {
-	return "repair/" + bucket + "/" + key
+func repairKey(host, bucket, key string) string {
+	return "repair/" + host + "/" + bucket + "/" + key
 }
 
 func bucketKey(bucket string) string {
@@ -130,8 +126,8 @@ func (s *Store) hostOrder(key string) []string {
 	return order
 }
 
-func (s *Store) appendTo(host string, data []byte) (Piece, bool) {
-	cells := append([]CellSpec(nil), s.byHost[host]...)
+func (s *Store) appendTo(cells []CellSpec, data []byte) (Piece, bool) {
+	cells = append([]CellSpec(nil), cells...)
 
 	rand.Shuffle(len(cells), func(i, j int) { cells[i], cells[j] = cells[j], cells[i] })
 
@@ -168,14 +164,22 @@ func (s *Store) appendTo(host string, data []byte) (Piece, bool) {
 func (s *Store) put(bucket, key string, data []byte, contentType string) (Manifest, error) {
 	m := Manifest{Size: int64(len(data)), Md5: md5hex(data), Mtime: time.Now().UTC(), ContentType: contentType}
 
+	var owing []string
+
 	if len(data) > 0 {
 		pieces := split(data)
 
 		for i, host := range s.hostOrder(key) {
-			if p, ok := s.appendTo(host, pieces[i]); ok {
-				p.Piece = i
-				m.Pieces = append(m.Pieces, p)
+			p, ok := s.appendTo(s.byHost[host], pieces[i])
+
+			if !ok {
+				owing = append(owing, host)
+
+				continue
 			}
+
+			p.Piece = i
+			m.Pieces = append(m.Pieces, p)
 		}
 
 		if len(m.Pieces) < 2 {
@@ -185,13 +189,15 @@ func (s *Store) put(bucket, key string, data []byte, contentType string) (Manife
 
 	s.etcd.put(objKey(bucket, key), throw2(json.Marshal(m)))
 
-	if len(data) > 0 && len(m.Pieces) < 3 {
-		s.etcd.put(repairKey(bucket, key), throw2(json.Marshal(Repair{Bad: -1})))
-	} else {
-		s.etcd.del(repairKey(bucket, key))
+	for _, host := range owing {
+		s.owe(host, bucket, key)
 	}
 
 	return m, nil
+}
+
+func (s *Store) owe(host, bucket, key string) {
+	s.etcd.put(repairKey(host, bucket, key), nil)
 }
 
 func (s *Store) manifest(bucket, key string) (Manifest, int64, error) {
@@ -275,7 +281,7 @@ func (s *Store) get(bucket, key string, m Manifest) ([]byte, error) {
 		if d0 != nil {
 			if data := assemble(d0, xor(d0, p), m.Size); md5hex(data) == m.Md5 {
 				if both {
-					s.suspect(bucket, key, 1)
+					s.suspect(bucket, key, byIndex[1])
 				}
 
 				return data, nil
@@ -285,7 +291,7 @@ func (s *Store) get(bucket, key string, m Manifest) ([]byte, error) {
 		if d1 != nil {
 			if data := assemble(xor(d1, p), d1, m.Size); md5hex(data) == m.Md5 {
 				if both {
-					s.suspect(bucket, key, 0)
+					s.suspect(bucket, key, byIndex[0])
 				}
 
 				return data, nil
@@ -296,123 +302,6 @@ func (s *Store) get(bucket, key string, m Manifest) ([]byte, error) {
 	return nil, errUnreadable
 }
 
-func (s *Store) suspect(bucket, key string, piece int) {
-	s.etcd.put(repairKey(bucket, key), throw2(json.Marshal(Repair{Bad: piece})))
-}
-
-func (s *Store) repair(bucket, key string, bad int) {
-	m, rev, err := s.manifest(bucket, key)
-
-	if errors.Is(err, errNoSuchKey) {
-		s.etcd.del(repairKey(bucket, key))
-
-		return
-	}
-
-	throw(err)
-
-	byIndex := map[int]Piece{}
-	hosts := map[string]bool{}
-
-	for _, p := range m.Pieces {
-		byIndex[p.Piece] = p
-		hosts[s.byId[p.Cell].Host] = true
-	}
-
-	var missing []int
-
-	for i := range 3 {
-		if _, ok := byIndex[i]; !ok || i == bad {
-			missing = append(missing, i)
-		}
-	}
-
-	if len(missing) == 0 || m.Size == 0 {
-		s.etcd.del(repairKey(bucket, key))
-
-		return
-	}
-
-	if len(missing) > 1 {
-		throwFmt("store: %s/%s has %d pieces to rebuild, can rebuild one", bucket, key, len(missing))
-	}
-
-	n := pieceLen(m.Size)
-	have := map[int][]byte{}
-
-	for i := range 3 {
-		if i == missing[0] {
-			continue
-		}
-
-		data, ok := s.fetch(byIndex[i], n)
-
-		if !ok {
-			throwFmt("store: %s/%s: piece %d is unreadable", bucket, key, i)
-		}
-
-		have[i] = data
-	}
-
-	var rebuilt []byte
-
-	switch missing[0] {
-	case 0:
-		rebuilt = xor(have[1], have[2])
-	case 1:
-		rebuilt = xor(have[0], have[2])
-	default:
-		rebuilt = xor(have[0], have[1])
-	}
-
-	if data := assemble(orElse(have[0], rebuilt, missing[0] == 0), orElse(have[1], rebuilt, missing[0] == 1), m.Size); md5hex(data) != m.Md5 {
-		throwFmt("store: %s/%s: the two pieces at hand do not rebuild the md5", bucket, key)
-	}
-
-	target := ""
-
-	if p, ok := byIndex[bad]; ok {
-		target = s.byId[p.Cell].Host
-	} else {
-		for _, h := range s.hosts {
-			if !hosts[h] {
-				target = h
-			}
-		}
-	}
-
-	if target == "" {
-		throwFmt("store: %s/%s: no host to put piece %d on", bucket, key, missing[0])
-	}
-
-	p, ok := s.appendTo(target, rebuilt)
-
-	if !ok {
-		throwFmt("store: %s/%s: host %s took nothing", bucket, key, target)
-	}
-
-	p.Piece = missing[0]
-
-	pieces := []Piece{p}
-
-	for _, old := range m.Pieces {
-		if old.Piece != missing[0] {
-			pieces = append(pieces, old)
-		}
-	}
-
-	sort.Slice(pieces, func(i, j int) bool { return pieces[i].Piece < pieces[j].Piece })
-	m.Pieces = pieces
-
-	if s.etcd.putIfRevision(objKey(bucket, key), throw2(json.Marshal(m)), rev) {
-		s.etcd.del(repairKey(bucket, key))
-	}
-}
-
-func orElse(have, rebuilt []byte, useRebuilt bool) []byte {
-	if useRebuilt {
-		return rebuilt
-	}
-
-	return have
+func (s *Store) suspect(bucket, key string, p Piece) {
+	s.owe(s.byId[p.Cell].Host, bucket, key)
 }

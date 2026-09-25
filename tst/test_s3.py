@@ -1,8 +1,8 @@
 """The S3 front over nine cells on three hosts and one etcd: buckets,
 objects of every size, listing with prefixes and delimiters, ranges,
-deletes; a host down at write time leaves two pieces and the background
-adds the third; a host down at read time and a corrupt piece are both
-served through the parity."""
+deletes; a host down at write time leaves two pieces and that host's
+repair adds the third into its own cells; a host down at read time and
+a corrupt piece are both served through the parity."""
 
 import http.client
 import json
@@ -179,33 +179,54 @@ status, _, _ = s3.request("DELETE", "/photos")
 if status != 409:
     lib.fail(f"delete non-empty bucket: {status}")
 
-# a host down at write time: two pieces, then the background adds the third
+# a repair refuses a config that reaches its own cells over the network
+with open(cluster.config) as f:
+    spec = json.load(f)
+for c in spec["cells"]:
+    if c["host"] == "h0":
+        c["addr"] = "10.255.0.1:" + c["addr"].rsplit(":", 1)[1]
+remote = cluster.config + ".remote"
+with open(remote, "w") as f:
+    json.dump(spec, f)
+r = lib.run("repair", "-c", remote, "-host", "h0")
+if r.returncode != 1 or "loopback" not in r.stderr:
+    lib.fail(f"repair with remote own cells: rc={r.returncode} stderr={r.stderr!r}")
+
+# a host down at write time: two pieces, then that host's repair adds the third
 cluster.host(2).stop()
 status, _, _ = s3.request("PUT", "/photos/degraded", blobs["odd"])
 if status != 200:
     lib.fail(f"put with a host down: {status}")
 
 m = etcd.manifest("photos", "degraded")
-if len(m["pieces"]) != 2 or not etcd.has("repair/photos/degraded"):
-    lib.fail(f"degraded manifest: {m} repair={etcd.has('repair/photos/degraded')}")
+if len(m["pieces"]) != 2 or not etcd.has("repair/h2/photos/degraded"):
+    lib.fail(f"degraded manifest: {m} repair={etcd.has('repair/h2/photos/degraded')}")
+
+for other in ("h0", "h1"):
+    if etcd.has(f"repair/{other}/photos/degraded"):
+        lib.fail(f"repair queued on {other}, which took its piece")
 
 status, _, body = s3.request("GET", "/photos/degraded")
 if status != 200 or body != blobs["odd"]:
     lib.fail(f"get degraded: {status}")
 
 cluster.host(2).start()
-cluster.background()
+cluster.repair()
 
 deadline = time.time() + 30
 while time.time() < deadline and len(etcd.manifest("photos", "degraded")["pieces"]) < 3:
     time.sleep(0.5)
 
-m = etcd.manifest("photos", "degraded")
-if len(m["pieces"]) != 3 or etcd.has("repair/photos/degraded"):
-    lib.fail(f"repaired manifest: {m} repair={etcd.has('repair/photos/degraded')}")
+m3 = etcd.manifest("photos", "degraded")
+if len(m3["pieces"]) != 3 or etcd.has("repair/h2/photos/degraded"):
+    lib.fail(f"repaired manifest: {m3} repair={etcd.has('repair/h2/photos/degraded')}")
 
-if sorted(cluster.host_of(p["cell"]) for p in m["pieces"]) != [0, 1, 2]:
-    lib.fail(f"pieces are not on three hosts: {m}")
+added = [p for p in m3["pieces"] if p not in m["pieces"]]
+if len(added) != 1 or cluster.host_of(added[0]["cell"]) != 2:
+    lib.fail(f"the third piece did not land on the host that owed it: {added}")
+
+if sorted(cluster.host_of(p["cell"]) for p in m3["pieces"]) != [0, 1, 2]:
+    lib.fail(f"pieces are not on three hosts: {m3}")
 
 # a host down at read time: the parity fills in
 for key in ("big", "odd", "tiny"):
@@ -217,27 +238,31 @@ for key in ("big", "odd", "tiny"):
     if status != 200 or body != blobs[key]:
         lib.fail(f"get {key} with host {down} down: {status} {len(body)}")
 
-# a corrupt piece: the parity rebuilds it, the key is queued for repair
+# a corrupt piece: the parity rebuilds it, the key is queued on the host holding it
 m = etcd.manifest("photos", "odd")
 p = next(p for p in m["pieces"] if p["piece"] == 1)
+owner = f"h{cluster.host_of(p['cell'])}"
 cluster.corrupt(p["cell"], p["offset"], 16)
 status, _, body = s3.request("GET", "/photos/odd")
 if status != 200 or body != blobs["odd"]:
     lib.fail(f"get with a corrupt piece: {status}")
 
-if not etcd.has("repair/photos/odd"):
-    lib.fail("corrupt piece was not queued for repair")
+if not etcd.has(f"repair/{owner}/photos/odd"):
+    lib.fail(f"corrupt piece was not queued on {owner}")
 
 deadline = time.time() + 30
-while time.time() < deadline and etcd.has("repair/photos/odd"):
+while time.time() < deadline and etcd.has(f"repair/{owner}/photos/odd"):
     time.sleep(0.5)
 
-if etcd.has("repair/photos/odd"):
+if etcd.has(f"repair/{owner}/photos/odd"):
     lib.fail("corrupt piece was not repaired")
 
 m2 = etcd.manifest("photos", "odd")
-if m2["pieces"] == m["pieces"]:
-    lib.fail("repair did not move the corrupt piece")
+p2 = next(p for p in m2["pieces"] if p["piece"] == 1)
+if p2 == p or f"h{cluster.host_of(p2['cell'])}" != owner:
+    lib.fail(f"corrupt piece was not rewritten on {owner}: {p} -> {p2}")
+if [q for q in m2["pieces"] if q["piece"] != 1] != [q for q in m["pieces"] if q["piece"] != 1]:
+    lib.fail(f"repair touched the sound pieces: {m} -> {m2}")
 
 cluster.clear_lru()
 status, _, body = s3.request("GET", "/photos/odd")
