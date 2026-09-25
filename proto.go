@@ -6,22 +6,26 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sort"
 	"sync"
+	"syscall"
 	"time"
 )
 
+var errLinkDown = errors.New("link down")
+
 const (
-	opAppend    = 1
-	opRead      = 2
-	opStatus    = 3
-	opReply     = 0x80
-	opFail      = 0xff
-	codeFull    = 1
-	codeRange   = 2
-	codeIo      = 3
-	frameHead   = 4 + 1 + 8
-	callTimeout = 60 * time.Second
-	dialTimeout = 5 * time.Second
+	opAppend  = 1
+	opRead    = 2
+	opStatus  = 3
+	opReply   = 0x80
+	opFail    = 0xff
+	codeFull  = 1
+	codeRange = 2
+	codeIo    = 3
+	frameHead = 4 + 1 + 8
+	idlePace  = time.Second
+	keepAlive = 10 * time.Second
 )
 
 type frame struct {
@@ -178,85 +182,138 @@ func (c *Cell) handle(op byte, body []byte) (byte, []byte) {
 	return opFail, nil
 }
 
-type request struct {
+type outcome struct {
+	tag  int
+	op   byte
+	body []byte
+}
+
+type message struct {
+	tag   int
 	op    byte
 	body  []byte
-	reply chan frame
+	reply chan outcome
 }
 
-type CellClient struct {
-	addr string
-	send chan request
+type Link struct {
+	addr    string
+	inbox   chan message
+	waiting map[uint64]message
+	last    uint64
 }
 
-func newCellClient(addr string) *CellClient {
-	cl := &CellClient{addr: addr, send: make(chan request)}
+func newLink(addr string) *Link {
+	l := &Link{addr: addr, inbox: make(chan message, 1024), waiting: map[uint64]message{}}
 
-	go cl.run()
+	go l.run()
 
-	return cl
+	return l
 }
 
-func (cl *CellClient) run() {
-	var conn net.Conn
-	var frames chan frame
-	var id uint64
+func (l *Link) run() {
+	for {
+		conn := l.connect()
 
-	waiting := map[uint64]chan frame{}
+		l.talk(conn)
+	}
+}
 
-	lost := func(why string) {
-		conn.Close()
-		conn, frames = nil, nil
+func (l *Link) accept(m message) {
+	l.last++
+	l.waiting[l.last] = m
+}
 
-		for i, ch := range waiting {
-			ch <- frame{body: []byte(why)}
+func (l *Link) connect() net.Conn {
+	down := false
 
-			delete(waiting, i)
+	for {
+		conn, err := net.Dial("tcp", l.addr)
+
+		if err == nil {
+			if tcp, ok := conn.(*net.TCPConn); ok {
+				tcp.SetKeepAlive(true)
+				tcp.SetKeepAlivePeriod(keepAlive)
+			}
+
+			if down {
+				slog.Info("link: connected", "cell", l.addr)
+			}
+
+			return conn
+		}
+
+		if !down {
+			slog.Warn("link: down", "cell", l.addr, "err", err)
+
+			down = true
+		}
+
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			for id, m := range l.waiting {
+				m.reply <- outcome{tag: m.tag}
+
+				delete(l.waiting, id)
+			}
+		}
+
+		select {
+		case m := <-l.inbox:
+			l.accept(m)
+		case <-time.After(idlePace):
+		}
+	}
+}
+
+func (l *Link) talk(conn net.Conn) {
+	frames := make(chan frame, 64)
+
+	go readFrames(conn, frames)
+
+	defer conn.Close()
+
+	ids := make([]uint64, 0, len(l.waiting))
+
+	for id := range l.waiting {
+		ids = append(ids, id)
+	}
+
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	for _, id := range ids {
+		m := l.waiting[id]
+
+		if writeFrame(conn, m.op, id, m.body) != nil {
+			return
 		}
 	}
 
 	for {
 		select {
-		case req := <-cl.send:
-			if conn == nil {
-				c, err := net.DialTimeout("tcp", cl.addr, dialTimeout)
+		case m := <-l.inbox:
+			l.accept(m)
 
-				if err != nil {
-					req.reply <- frame{body: []byte(err.Error())}
-
-					continue
-				}
-
-				conn, frames = c, make(chan frame, 64)
-
-				go readFrames(conn, frames)
-			}
-
-			id++
-			waiting[id] = req.reply
-
-			if err := writeFrame(conn, req.op, id, req.body); err != nil {
-				conn.Close()
+			if writeFrame(conn, m.op, l.last, m.body) != nil {
+				return
 			}
 		case f := <-frames:
 			if f.op == 0 {
-				lost("connection lost")
+				slog.Warn("link: connection lost", "cell", l.addr, "inflight", len(l.waiting))
 
-				continue
+				return
 			}
 
-			rid, body, ok := splitId(f.body)
+			id, body, ok := splitId(f.body)
 
 			if !ok {
-				lost("reply without an id")
+				slog.Warn("link: reply without an id", "cell", l.addr)
 
-				continue
+				return
 			}
 
-			if ch, found := waiting[rid]; found {
-				delete(waiting, rid)
+			if m, found := l.waiting[id]; found {
+				delete(l.waiting, id)
 
-				ch <- frame{op: f.op, body: body}
+				m.reply <- outcome{tag: m.tag, op: f.op, body: body}
 			}
 		}
 	}
@@ -276,23 +333,8 @@ func readFrames(conn net.Conn, frames chan frame) {
 	}
 }
 
-func (cl *CellClient) call(op byte, body []byte) (byte, []byte) {
-	req := request{op: op, body: body, reply: make(chan frame, 1)}
-
-	cl.send <- req
-
-	select {
-	case f := <-req.reply:
-		if f.op == 0 {
-			throwFmt("cell %s: %s", cl.addr, f.body)
-		}
-
-		return f.op, f.body
-	case <-time.After(callTimeout):
-		throwFmt("cell %s: no reply to op %d in %s", cl.addr, op, callTimeout)
-	}
-
-	return 0, nil
+func (l *Link) send(tag int, op byte, body []byte, reply chan outcome) {
+	l.inbox <- message{tag: tag, op: op, body: body, reply: reply}
 }
 
 func failCode(body []byte) byte {
@@ -303,43 +345,28 @@ func failCode(body []byte) byte {
 	return codeIo
 }
 
-func (cl *CellClient) append(data []byte) (int64, error) {
-	op, resp := cl.call(opAppend, data)
-
+func appended(o outcome) (int64, error) {
 	switch {
-	case op == opAppend|opReply && len(resp) == 8:
-		return int64(binary.BigEndian.Uint64(resp)), nil
-	case op == opFail && failCode(resp) == codeFull:
+	case o.op == 0:
+		return 0, errLinkDown
+	case o.op == opAppend|opReply && len(o.body) == 8:
+		return int64(binary.BigEndian.Uint64(o.body)), nil
+	case o.op == opFail && failCode(o.body) == codeFull:
 		return 0, errFull
 	}
 
-	throwFmt("cell %s: append answered op %d", cl.addr, op)
-
-	return 0, nil
+	return 0, errors.New("proto: append failed")
 }
 
-func (cl *CellClient) read(off int64, n int64) ([]byte, error) {
-	req := binary.BigEndian.AppendUint64(nil, uint64(off))
-	op, resp := cl.call(opRead, binary.BigEndian.AppendUint32(req, uint32(n)))
-
+func readOut(o outcome) ([]byte, error) {
 	switch {
-	case op == opRead|opReply:
-		return resp, nil
-	case op == opFail && failCode(resp) == codeRange:
+	case o.op == 0:
+		return nil, errLinkDown
+	case o.op == opRead|opReply:
+		return o.body, nil
+	case o.op == opFail && failCode(o.body) == codeRange:
 		return nil, errRange
 	}
 
-	throwFmt("cell %s: read answered op %d", cl.addr, op)
-
-	return nil, nil
-}
-
-func (cl *CellClient) status() (int64, int64) {
-	op, resp := cl.call(opStatus, nil)
-
-	if op != opStatus|opReply || len(resp) != 16 {
-		throwFmt("cell %s: status answered op %d", cl.addr, op)
-	}
-
-	return int64(binary.BigEndian.Uint64(resp)), int64(binary.BigEndian.Uint64(resp[8:]))
+	return nil, errors.New("proto: read failed")
 }

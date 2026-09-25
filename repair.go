@@ -93,14 +93,7 @@ func (r *Repairer) fix(bucket, key string) {
 	throw(err)
 
 	mine := r.pieceOf(bucket, key, m)
-	n := pieceLen(m.Size)
-	have := [3][]byte{}
-
-	for _, p := range m.Pieces {
-		if data, ok := r.store.fetch(p, n); ok {
-			have[p.Piece] = data
-		}
-	}
+	have := r.store.fetchAll(m.Pieces, pieceLen(m.Size))
 
 	if sound(have, m) {
 		r.drop(bucket, key)

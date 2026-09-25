@@ -53,9 +53,12 @@ nothing about objects, and no table maps ids to disks.
 ## Write
 
 The front reads the whole body into memory, computing its md5 on the
-way, then appends the pieces to the three hosts in turn: `d0`, `d1`,
-then `p`, each into the emptiest cell of its host. If the third append
-fails, the two halves of data are still there and reads need no XOR.
+way, then appends the three pieces to their three hosts at once, each
+into a cell of its host picked at random; a cell that is full sends the
+piece to the next cell of the same host, a host whose cell is down is
+left owing the piece. Nothing is retried: the outcome of every append
+is known, and the client above retries the whole request if too little
+of it landed.
 
 Three appends landed: write the key and return. Two landed: write the
 key with two sources, then a `repair/<host>/` entry for the host that
@@ -67,11 +70,12 @@ reader never sees a pointer to bytes that are not there.
 
 ## Read
 
-Fetch `d0` and `d1`, assemble, check the md5 kept in the key. On
-mismatch fetch `p` as well and try the three combinations until one
-matches; the piece the winning combination left out is the corrupt one,
-and the key goes to the repair queue of the host holding it. No
-combination matches: the object is lost.
+Fetch `d0` and `d1` at once, assemble, check the md5 kept in the key.
+On mismatch or a half missing fetch `p` as well and try the remaining
+combinations; the piece the winning combination left out is the
+corrupt one, and the key goes to the repair queue of the host holding
+it. A piece whose cell is down is simply absent for this read. No
+combination matches: the read fails and the client decides.
 
 Range requests assemble the whole object and return the slice.
 
@@ -80,8 +84,9 @@ Range requests assemble the whole object and return the slice.
 Every host runs `s3 repair -host <name>` over its own queue,
 `repair/<name>/`: an entry there means this host owes a piece of that
 key, either because it took nothing at write time or because a read
-found its piece corrupt. The handler reads what the key has, over the
-network for the other hosts' pieces; if all three are there and agree
+found its piece corrupt. The handler reads what the key has, all
+pieces at once, over the network for the other hosts'; if all three are
+there and agree
 with the md5 and with each other the entry is stale and is dropped.
 Otherwise it rebuilds its own piece from the other two, appends it to
 one of its own cells, which it reaches over loopback only and refuses
@@ -108,11 +113,15 @@ NotImplemented rather than with a listing that happens to share the URL.
 
 ## Transport
 
-TCP, one connection per process-cell pair, opened on first use and
-kept; requests are multiplexed on it and answered in whatever order
-the cell finishes them. A frame is a length, an op and a body whose
-layout the op decides; every op so far starts its body with a request
-id that the reply carries back:
+TCP, one connection per process-cell pair. The cluster is static, so
+every process knows every connection it will ever have and holds all
+of them from the start: a goroutine per cell, a channel in front of
+it, and a loop that connects until it is connected, then talks until
+the socket dies, then connects again. Requests are multiplexed on the
+connection and answered in whatever order the cell finishes them. A
+frame is a length, an op and a body whose layout the op decides; every
+op so far starts its body with a request id that the reply carries
+back:
 
 ```
 frame:   len u32 | op u8 | body            len counts op and body
@@ -125,15 +134,19 @@ frame:   len u32 | op u8 | body            len counts op and body
 code: 1 full, 2 past the head, 3 io error
 ```
 
-On the client one goroutine owns the connection: it takes requests
-from a channel, numbers them, remembers the reply channel by id and
-writes the frame; a reader goroutine turns the socket into a channel of
-frames, and the owner hands each reply to the goroutine waiting on that
-id. A lost connection fails everything in flight and is redialed by the
-next request; a reply that never comes fails after a minute. Nothing is
-shared, nothing is locked. On the cell every frame is handled in its
-own goroutine, so appends from one connection land in one tick and one
-fsync, and a writer goroutine serializes the replies.
+The goroutine owns the connection and the table of messages it has
+taken from its channel and not yet answered. Every message gets
+exactly one outcome: the reply with its id, or a synthetic `link down`.
+A socket that dies produces neither; the goroutine reconnects and
+sends the table again, and only a connect that comes back refused
+means the cell is not there: then everything in the table gets
+`link down` and the senders decide what that means for their
+operation. While the link is down a message arriving on the channel
+prompts a connect right away, so the answer is as fresh as the last
+attempt, never a timer. Nothing is shared, nothing is locked, nothing
+is retried below the operation. On the cell every frame is handled in
+its own goroutine, so appends from one connection land in one tick and
+one fsync, and a writer goroutine serializes the replies.
 
 Cells and fronts talk over the storage network, which is private; there
 is no authentication and no encryption on this link. The code speaks

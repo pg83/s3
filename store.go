@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/md5"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -33,15 +34,15 @@ type Manifest struct {
 }
 
 type Store struct {
-	etcd    *Etcd
-	hosts   []string
-	byHost  map[string][]CellSpec
-	byId    map[int]CellSpec
-	clients map[int]*CellClient
+	etcd   *Etcd
+	hosts  []string
+	byHost map[string][]CellSpec
+	byId   map[int]CellSpec
+	links  map[int]*Link
 }
 
 func newStore(cfg *Config) *Store {
-	s := &Store{etcd: newEtcd(cfg.Etcd), byHost: map[string][]CellSpec{}, byId: map[int]CellSpec{}, clients: map[int]*CellClient{}}
+	s := &Store{etcd: newEtcd(cfg.Etcd), byHost: map[string][]CellSpec{}, byId: map[int]CellSpec{}, links: map[int]*Link{}}
 
 	for _, c := range cfg.Cells {
 		if _, seen := s.byHost[c.Host]; !seen {
@@ -50,7 +51,7 @@ func newStore(cfg *Config) *Store {
 
 		s.byHost[c.Host] = append(s.byHost[c.Host], c)
 		s.byId[c.Id] = c
-		s.clients[c.Id] = newCellClient(c.Addr)
+		s.links[c.Id] = newLink(c.Addr)
 	}
 
 	sort.Strings(s.hosts)
@@ -134,26 +135,21 @@ func (s *Store) appendTo(cells []CellSpec, data []byte) (Piece, bool) {
 	rand.Shuffle(len(cells), func(i, j int) { cells[i], cells[j] = cells[j], cells[i] })
 
 	for _, c := range cells {
-		var offset int64
-		var err error
+		reply := make(chan outcome, 1)
 
-		exc := try(func() {
-			offset, err = s.clients[c.Id].append(data)
-		})
+		s.links[c.Id].send(c.Id, opAppend, data, reply)
 
-		if exc != nil {
-			slog.Warn("store: append", "cell", c.Id, "addr", c.Addr, "err", exc.error())
+		offset, err := appended(<-reply)
 
-			continue
+		if err == nil {
+			return Piece{Cell: c.Id, Offset: offset}, true
 		}
 
-		if err != nil {
-			slog.Warn("store: append", "cell", c.Id, "err", err)
+		slog.Warn("store: append", "cell", c.Id, "err", err)
 
-			continue
+		if !errors.Is(err, errFull) {
+			return Piece{}, false
 		}
-
-		return Piece{Cell: c.Id, Offset: offset}, true
 	}
 
 	return Piece{}, false
@@ -166,19 +162,35 @@ func (s *Store) put(bucket, key string, data []byte, contentType string) (Manife
 
 	if len(data) > 0 {
 		pieces := split(data)
+		order := s.hostOrder(key)
+		placed := make(chan Piece, len(order))
 
-		for i, host := range s.hostOrder(key) {
-			p, ok := s.appendTo(s.byHost[host], pieces[i])
+		for i, host := range order {
+			go func() {
+				p, ok := s.appendTo(s.byHost[host], pieces[i])
 
-			if !ok {
-				owing = append(owing, host)
+				if !ok {
+					p.Cell = -1
+				}
+
+				p.Piece = i
+				placed <- p
+			}()
+		}
+
+		for range order {
+			p := <-placed
+
+			if p.Cell < 0 {
+				owing = append(owing, order[p.Piece])
 
 				continue
 			}
 
-			p.Piece = i
 			m.Pieces = append(m.Pieces, p)
 		}
+
+		sort.Slice(m.Pieces, func(i, j int) bool { return m.Pieces[i].Piece < m.Pieces[j].Piece })
 
 		if len(m.Pieces) < 2 {
 			return m, errTooFewCells
@@ -217,20 +229,41 @@ func (s *Store) fetch(p Piece, n int64) ([]byte, bool) {
 		return nil, false
 	}
 
-	var data []byte
-	var err error
+	body := binary.BigEndian.AppendUint64(nil, uint64(p.Offset))
+	reply := make(chan outcome, 1)
 
-	exc := try(func() {
-		data, err = s.clients[p.Cell].read(p.Offset, n)
-	})
+	s.links[p.Cell].send(p.Cell, opRead, binary.BigEndian.AppendUint32(body, uint32(n)), reply)
 
-	if exc != nil || err != nil {
-		slog.Warn("store: read", "cell", p.Cell, "offset", p.Offset, "exc", exc.asError(), "err", err)
+	data, err := readOut(<-reply)
+
+	if err != nil {
+		slog.Warn("store: read", "cell", p.Cell, "offset", p.Offset, "err", err)
 
 		return nil, false
 	}
 
 	return data, true
+}
+
+func (s *Store) fetchAll(pieces []Piece, n int64) [3][]byte {
+	got := make(chan Piece, len(pieces))
+	have := [3][]byte{}
+	data := make([][]byte, 3)
+
+	for _, p := range pieces {
+		go func() {
+			data[p.Piece], _ = s.fetch(p, n)
+			got <- p
+		}()
+	}
+
+	for range pieces {
+		p := <-got
+
+		have[p.Piece] = data[p.Piece]
+	}
+
+	return have
 }
 
 func (s *Store) get(bucket, key string, m Manifest) ([]byte, error) {
@@ -239,39 +272,36 @@ func (s *Store) get(bucket, key string, m Manifest) ([]byte, error) {
 	}
 
 	n := pieceLen(m.Size)
-	have := map[int][]byte{}
 	byIndex := map[int]Piece{}
 
 	for _, p := range m.Pieces {
 		byIndex[p.Piece] = p
 	}
 
-	load := func(i int) []byte {
-		if data, ok := have[i]; ok {
-			return data
-		}
+	var halves []Piece
 
+	for i := range 2 {
 		if p, ok := byIndex[i]; ok {
-			if data, ok := s.fetch(p, n); ok {
-				have[i] = data
-			}
+			halves = append(halves, p)
 		}
-
-		return have[i]
 	}
 
-	d0, d1 := load(0), load(1)
-	both := d0 != nil && d1 != nil
+	have := s.fetchAll(halves, n)
+	both := have[0] != nil && have[1] != nil
 
 	if both {
-		if data := assemble(d0, d1, m.Size); md5hex(data) == m.Md5 {
+		if data := assemble(have[0], have[1], m.Size); md5hex(data) == m.Md5 {
 			return data, nil
 		}
 	}
 
-	if p := load(2); p != nil {
-		if d0 != nil {
-			if data := assemble(d0, xor(d0, p), m.Size); md5hex(data) == m.Md5 {
+	if p, ok := byIndex[2]; ok {
+		have[2], _ = s.fetch(p, n)
+	}
+
+	if have[2] != nil {
+		if have[0] != nil {
+			if data := assemble(have[0], xor(have[0], have[2]), m.Size); md5hex(data) == m.Md5 {
 				if both {
 					s.suspect(bucket, key, byIndex[1])
 				}
@@ -280,8 +310,8 @@ func (s *Store) get(bucket, key string, m Manifest) ([]byte, error) {
 			}
 		}
 
-		if d1 != nil {
-			if data := assemble(xor(d1, p), d1, m.Size); md5hex(data) == m.Md5 {
+		if have[1] != nil {
+			if data := assemble(xor(have[1], have[2]), have[1], m.Size); md5hex(data) == m.Md5 {
 				if both {
 					s.suspect(bucket, key, byIndex[0])
 				}
