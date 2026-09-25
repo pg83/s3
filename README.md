@@ -74,10 +74,13 @@ left owing the piece. Nothing is retried: the outcome of every append
 is known, and the client above retries the whole request if too little
 of it landed.
 
-Three appends landed: write the key and return. Two landed: write the
-key with two sources, then a `repair/<host>/` entry for the host that
-took nothing, and return. Fewer: fail; nothing is rolled back, the
-orphan pieces are garbage in their cells.
+Two appends landed: write the key with those two sources and answer
+the client; it does not wait for the third. The third is waited for
+after the answer: landed, the key is written again with three sources
+under a compare-and-swap on the revision the answer was given at;
+failed, a `repair/<host>/` entry is left for the host that took
+nothing. Fewer than two: fail; nothing is rolled back, the orphan
+pieces are garbage in their cells.
 
 The key in etcd is written only after the pieces are durable, so a
 reader never sees a pointer to bytes that are not there.

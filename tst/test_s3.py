@@ -110,10 +110,17 @@ for th in threads:
 if failures:
     lib.fail(f"burst: {failures}")
 
+def wait_pieces(bucket, key, n, timeout=10):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        m = etcd.manifest(bucket, key)
+        if len(m["pieces"]) == n:
+            return m
+        time.sleep(0.05)
+    lib.fail(f"{bucket}/{key} has {len(etcd.manifest(bucket, key)['pieces'])} pieces, wanted {n}")
+
 for key in burst:
-    m = etcd.manifest("burst", key)
-    if len(m["pieces"]) != 3:
-        lib.fail(f"burst {key} landed on {len(m['pieces'])} pieces")
+    wait_pieces("burst", key, 3)
 
 # a client that walks away mid-request leaves the front intact
 gone = socket.create_connection(("127.0.0.1", cluster.front_port))
@@ -239,9 +246,12 @@ status, _, _ = s3.request("PUT", "/photos/degraded", blobs["odd"])
 if status != 200:
     lib.fail(f"put with a host down: {status}")
 
-m = etcd.manifest("photos", "degraded")
-if len(m["pieces"]) != 2 or not etcd.has("repair/h2/photos/degraded"):
-    lib.fail(f"degraded manifest: {m} repair={etcd.has('repair/h2/photos/degraded')}")
+m = wait_pieces("photos", "degraded", 2)
+deadline = time.time() + 10
+while time.time() < deadline and not etcd.has("repair/h2/photos/degraded"):
+    time.sleep(0.05)
+if not etcd.has("repair/h2/photos/degraded"):
+    lib.fail("the host that took nothing was not left owing")
 
 for other in ("h0", "h1"):
     if etcd.has(f"repair/{other}/photos/degraded"):

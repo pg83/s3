@@ -110,8 +110,11 @@ func (r *Repairer) fix(bucket, key string) {
 		throwFmt("repair: %s/%s: the other two pieces do not rebuild the md5", bucket, key)
 	}
 
-	placed, _ := r.store.place(nil, map[int][]byte{mine: have[mine]}, map[int]string{mine: r.host})
-	p, ok := placed[mine]
+	pl := r.store.placer(map[int][]byte{mine: have[mine]}, map[int]string{mine: r.host})
+
+	pl.wait(nil, 1)
+
+	p, ok := pl.placed[mine]
 
 	if !ok {
 		throwFmt("repair: %s/%s: no cell of %s took the piece", bucket, key, r.host)

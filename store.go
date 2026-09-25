@@ -136,114 +136,155 @@ type placing struct {
 	cell  int
 }
 
-func (s *Store) place(gone <-chan struct{}, pieces map[int][]byte, hosts map[int]string) (map[int]Piece, bool) {
-	reply := make(chan outcome, len(pieces)*len(s.byId))
-	plan := map[int]*placing{}
-	placed := map[int]Piece{}
-	pending := 0
+type placer struct {
+	store   *Store
+	pieces  map[int][]byte
+	plan    map[int]*placing
+	placed  map[int]Piece
+	reply   chan outcome
+	pending int
+}
 
-	offer := func(i int) bool {
-		p := plan[i]
-
-		if len(p.cells) == 0 {
-			return false
-		}
-
-		p.cell, p.cells = p.cells[0].Id, p.cells[1:]
-
-		s.links[p.cell].send(i, opAppend, pieces[i], reply)
-
-		return true
-	}
+func (s *Store) placer(pieces map[int][]byte, hosts map[int]string) *placer {
+	p := &placer{store: s, pieces: pieces, plan: map[int]*placing{}, placed: map[int]Piece{}, reply: make(chan outcome, len(pieces)*len(s.byId))}
 
 	for i, host := range hosts {
 		cells := append([]CellSpec(nil), s.byHost[host]...)
 
 		rand.Shuffle(len(cells), func(a, b int) { cells[a], cells[b] = cells[b], cells[a] })
 
-		plan[i] = &placing{host: host, cells: cells}
+		p.plan[i] = &placing{host: host, cells: cells}
 
-		if offer(i) {
-			pending++
+		if p.offer(i) {
+			p.pending++
 		}
 	}
 
-	for pending > 0 {
-		var o outcome
+	return p
+}
 
+func (p *placer) offer(i int) bool {
+	pl := p.plan[i]
+
+	if len(pl.cells) == 0 {
+		return false
+	}
+
+	pl.cell, pl.cells = pl.cells[0].Id, pl.cells[1:]
+
+	p.store.links[pl.cell].send(i, opAppend, p.pieces[i], p.reply)
+
+	return true
+}
+
+func (p *placer) take(o outcome) {
+	p.pending--
+
+	offset, err := appended(o)
+
+	if err == nil {
+		p.placed[o.tag] = Piece{Cell: p.plan[o.tag].cell, Offset: offset, Piece: o.tag}
+
+		return
+	}
+
+	slog.Warn("store: append", "cell", p.plan[o.tag].cell, "err", err)
+
+	if errors.Is(err, errFull) && p.offer(o.tag) {
+		p.pending++
+	}
+}
+
+func (p *placer) wait(gone <-chan struct{}, need int) bool {
+	for len(p.placed) < need && p.pending > 0 {
 		select {
-		case o = <-reply:
+		case o := <-p.reply:
+			p.take(o)
 		case <-gone:
-			for _, p := range plan {
-				s.links[p.cell].cancel(reply)
+			for _, pl := range p.plan {
+				p.store.links[pl.cell].cancel(p.reply)
 			}
 
-			return placed, false
-		}
-
-		pending--
-
-		offset, err := appended(o)
-
-		if err == nil {
-			placed[o.tag] = Piece{Cell: plan[o.tag].cell, Offset: offset, Piece: o.tag}
-
-			continue
-		}
-
-		slog.Warn("store: append", "cell", plan[o.tag].cell, "err", err)
-
-		if errors.Is(err, errFull) && offer(o.tag) {
-			pending++
+			return false
 		}
 	}
 
-	return placed, true
+	return true
+}
+
+func (p *placer) pieces3() []Piece {
+	var out []Piece
+
+	for i := range 3 {
+		if piece, ok := p.placed[i]; ok {
+			out = append(out, piece)
+		}
+	}
+
+	return out
 }
 
 func (s *Store) put(gone <-chan struct{}, bucket, key string, data []byte, contentType string) (Manifest, error) {
 	m := Manifest{Size: int64(len(data)), Md5: md5hex(data), Mtime: time.Now().UTC(), ContentType: contentType}
 
-	var owing []string
+	if len(data) == 0 {
+		s.etcd.put(objKey(bucket, key), throw2(json.Marshal(m)))
 
-	if len(data) > 0 {
-		pieces := split(data)
-		hosts := map[int]string{}
-		want := map[int][]byte{}
-
-		for i, host := range s.hostOrder(key) {
-			hosts[i] = host
-			want[i] = pieces[i]
-		}
-
-		placed, stayed := s.place(gone, want, hosts)
-
-		if !stayed {
-			return m, errClientGone
-		}
-
-		for i := range 3 {
-			if p, ok := placed[i]; ok {
-				m.Pieces = append(m.Pieces, p)
-
-				continue
-			}
-
-			owing = append(owing, hosts[i])
-		}
-
-		if len(m.Pieces) < 2 {
-			return m, errTooFewCells
-		}
+		return m, nil
 	}
 
-	s.etcd.put(objKey(bucket, key), throw2(json.Marshal(m)))
+	pieces := split(data)
+	hosts := map[int]string{}
+	want := map[int][]byte{}
 
-	for _, host := range owing {
-		s.owe(host, bucket, key)
+	for i, host := range s.hostOrder(key) {
+		hosts[i] = host
+		want[i] = pieces[i]
+	}
+
+	p := s.placer(want, hosts)
+
+	if !p.wait(gone, 2) {
+		return m, errClientGone
+	}
+
+	if len(p.placed) < 2 {
+		return m, errTooFewCells
+	}
+
+	m.Pieces = p.pieces3()
+
+	rev := s.etcd.putRev(objKey(bucket, key), throw2(json.Marshal(m)))
+
+	if p.pending > 0 {
+		go s.settle(p, bucket, key, m, rev)
+	} else {
+		s.settle(p, bucket, key, m, rev)
 	}
 
 	return m, nil
+}
+
+func (s *Store) settle(p *placer, bucket, key string, m Manifest, rev int64) {
+	try(func() {
+		p.wait(nil, 3)
+
+		if len(p.placed) > len(m.Pieces) {
+			m.Pieces = p.pieces3()
+
+			if !s.etcd.putIfRevision(objKey(bucket, key), throw2(json.Marshal(m)), rev) {
+				slog.Warn("store: key changed before its third piece landed", "bucket", bucket, "key", key)
+			}
+		}
+
+		for i := range 3 {
+			if _, ok := p.placed[i]; !ok {
+				s.owe(p.plan[i].host, bucket, key)
+			}
+		}
+	}).catch(func(exc *Exception) {
+		slog.Error("store: settle", "bucket", bucket, "key", key, "err", exc.error())
+	})
 }
 
 func (s *Store) owe(host, bucket, key string) {

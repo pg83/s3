@@ -127,7 +127,19 @@ func (e *Etcd) scan(prefix, from string, limit int) ([]Entry, bool) {
 }
 
 func (e *Etcd) put(key string, value []byte) {
-	e.call("put", map[string]any{"key": b64([]byte(key)), "value": b64(value)})
+	e.putRev(key, value)
+}
+
+func (e *Etcd) putRev(key string, value []byte) int64 {
+	out := e.call("put", map[string]any{"key": b64([]byte(key)), "value": b64(value)})
+
+	var header struct {
+		Revision string `json:"revision"`
+	}
+
+	throw(json.Unmarshal(out["header"], &header))
+
+	return throw2(strconv.ParseInt(header.Revision, 10, 64))
 }
 
 func (e *Etcd) del(key string) {
