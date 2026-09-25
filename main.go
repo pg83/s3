@@ -1,0 +1,66 @@
+package main
+
+import (
+	"flag"
+	"log/slog"
+	"os"
+)
+
+func main() {
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+
+	if len(os.Args) < 2 {
+		printUsage()
+		os.Exit(1)
+	}
+
+	try(func() {
+		switch os.Args[1] {
+		case "cell":
+			fs := flag.NewFlagSet("cell", flag.ExitOnError)
+			listen := fs.String("listen", "", "address to serve cell requests on")
+			ssd := fs.String("ssd", "", "directory on the SSD for the log tail")
+			hdd := fs.String("hdd", "", "raw block device for the log")
+
+			throw(fs.Parse(os.Args[2:]))
+			runCell(*listen, *ssd, *hdd)
+		case "front":
+			fs := flag.NewFlagSet("front", flag.ExitOnError)
+			config := fs.String("c", "", "config file")
+			listen := fs.String("listen", "", "address to serve S3 on")
+
+			throw(fs.Parse(os.Args[2:]))
+			runFront(loadConfig(*config), *listen)
+		case "background":
+			fs := flag.NewFlagSet("background", flag.ExitOnError)
+			config := fs.String("c", "", "config file")
+
+			throw(fs.Parse(os.Args[2:]))
+			runBackground(loadConfig(*config))
+		case "web":
+			fs := flag.NewFlagSet("web", flag.ExitOnError)
+			config := fs.String("c", "", "config file")
+			listen := fs.String("listen", "", "address to serve the browser on")
+
+			throw(fs.Parse(os.Args[2:]))
+			runWeb(loadConfig(*config), *listen)
+		default:
+			printUsage()
+			os.Exit(1)
+		}
+	}).catch(func(exc *Exception) {
+		slog.Error(exc.error())
+		os.Exit(1)
+	})
+}
+
+func printUsage() {
+	os.Stderr.WriteString(`Usage: s3 command [flags]
+
+Commands:
+  cell -listen addr -ssd dir -hdd device      append-only log on one disk
+  front -c config.json -listen addr           S3 API over the cells and etcd
+  background -c config.json                   finish the writes that landed on two cells
+  web -c config.json -listen addr             browse buckets and objects
+`)
+}

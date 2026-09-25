@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y etcd-server etcd-client
+          echo "S3_TEST_ARTIFACTS=$RUNNER_TEMP/s3-artifacts" >> "$GITHUB_ENV"
+
+      - name: Format
+        run: test -z "$(gofmt -l *.go)" || { gofmt -d *.go; exit 1; }
+
+      - name: Vet
+        run: go vet ./...
+        env:
+          GOFLAGS: -mod=readonly
+
+      - name: Build and test
+        run: |
+          ./build -k -j 4 test
+          ./build s3
