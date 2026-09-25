@@ -101,6 +101,9 @@ if cell.stop() != 0:
     lib.fail("cell did not exit cleanly on SIGTERM")
 
 cell.start()
+
+if os.listdir(cell.load) != ["0"]:
+    lib.fail(f"restart dropped the load copies: {os.listdir(cell.load)}")
 c = cell.client()
 head, free = c.status()
 

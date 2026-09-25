@@ -23,11 +23,17 @@ store: a writer wakes every 100 ms, writes everything that arrived
 since the last tick, fsyncs once and only then answers with the offsets.
 A block that is full is renamed into `ready/` in the store; a second
 goroutine copies ready blocks to the raw HDD at `n * 2 MiB`, fsyncs and
-removes them. Readers ask nobody: a block is opened from the load, else
-from `current.<n>`, else from `ready/`, in that order because a block
-only ever moves forward through them, else copied from the HDD into the
-load under the one lock the cell has. The load is swept by age past its
-budget. No index, no checksum; the bytes are the front's to interpret.
+removes them. A reader asks the load's one owner goroutine for its
+block and gets an open file back: a copy in the load, else
+`current.<n>`, else `ready/`, in that order because a block only ever
+moves forward through them, else a copy the owner makes from the HDD.
+The owner keeps the copies in the order they were last read; a copy
+that does not fit, which the load reports as an error on the write,
+evicts the least recently read copies until it does. A block on the
+HDD never changes, so a copy is good until it is evicted: a restart
+keeps them, the owner relearns what is there and takes the copy time
+as the order, since that is all it can know. No index, no checksum;
+the bytes are the front's to interpret.
 
 A cell that runs out of space starts, does not open its port and exits.
 Refilling an empty cell from the other two hosts is the compaction.

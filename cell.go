@@ -11,9 +11,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
+
+	"container/list"
 )
 
 var (
@@ -24,8 +25,6 @@ var (
 const (
 	blockSize    = 2 << 20
 	tick         = 100 * time.Millisecond
-	lruBudget    = 1 << 30
-	lruSweep     = 10 * time.Second
 	minFree      = 1 << 20
 	maxFrameSize = 1 << 31
 )
@@ -40,14 +39,24 @@ type WriteResp struct {
 	err    error
 }
 
+type ReadReq struct {
+	num  int64
+	done chan ReadResp
+}
+
+type ReadResp struct {
+	f   *os.File
+	err error
+}
+
 type Cell struct {
 	load     string
 	store    string
 	hdd      *os.File
 	capacity int64
 	writes   chan WriteReq
+	reads    chan ReadReq
 	ready    chan struct{}
-	fill     sync.Mutex
 	num      int64
 	current  *os.File
 	size     int64
@@ -70,7 +79,7 @@ func runCell(listen, load, store, hdd string) {
 
 	go c.writer()
 	go c.flusher()
-	go c.sweeper()
+	go c.loader()
 
 	stop := make(chan os.Signal, 1)
 
@@ -101,6 +110,7 @@ func openCell(load, store, hdd string) *Cell {
 		hdd:      dev,
 		capacity: throw2(dev.Seek(0, io.SeekEnd)),
 		writes:   make(chan WriteReq, 4096),
+		reads:    make(chan ReadReq, 4096),
 		ready:    make(chan struct{}, 1),
 	}
 
@@ -298,7 +308,7 @@ func (c *Cell) read(off int64, n int64) ([]byte, error) {
 	for pos := off; pos < off+n; {
 		num := pos / blockSize
 		end := min(off+n, (num+1)*blockSize)
-		f := c.open(num)
+		f := throw2(c.block(num))
 		_, err := f.ReadAt(out[pos-off:end-off], pos-num*blockSize)
 
 		throw(f.Close())
@@ -315,11 +325,73 @@ func (c *Cell) read(off int64, n int64) ([]byte, error) {
 	return out, nil
 }
 
-func (c *Cell) open(num int64) *os.File {
-	if f, err := os.Open(c.loadPath(num)); err == nil {
-		os.Chtimes(c.loadPath(num), time.Now(), time.Now())
+func (c *Cell) block(num int64) (*os.File, error) {
+	done := make(chan ReadResp, 1)
 
-		return f
+	c.reads <- ReadReq{num: num, done: done}
+
+	resp := <-done
+
+	return resp.f, resp.err
+}
+
+type loaded struct {
+	order *list.List
+	byNum map[int64]*list.Element
+}
+
+func (c *Cell) loader() {
+	l := &loaded{order: list.New(), byNum: map[int64]*list.Element{}}
+
+	c.warm(l)
+
+	for req := range c.reads {
+		var resp ReadResp
+
+		try(func() {
+			resp.f = c.open(l, req.num)
+		}).catch(func(exc *Exception) {
+			resp.err = exc.asError()
+		})
+
+		req.done <- resp
+	}
+}
+
+func (c *Cell) warm(l *loaded) {
+	var copies []os.FileInfo
+
+	for _, entry := range throw2(os.ReadDir(c.load)) {
+		if strings.HasSuffix(entry.Name(), ".tmp") {
+			throw(os.Remove(filepath.Join(c.load, entry.Name())))
+
+			continue
+		}
+
+		if info, err := entry.Info(); err == nil {
+			copies = append(copies, info)
+		}
+	}
+
+	sort.Slice(copies, func(i, j int) bool { return copies[i].ModTime().Before(copies[j].ModTime()) })
+
+	for _, info := range copies {
+		num := throw2(strconv.ParseInt(info.Name(), 10, 64))
+
+		l.byNum[num] = l.order.PushFront(num)
+	}
+}
+
+func (c *Cell) open(l *loaded, num int64) *os.File {
+	if e, ok := l.byNum[num]; ok {
+		if f, err := os.Open(c.loadPath(num)); err == nil {
+			l.order.MoveToFront(e)
+
+			return f
+		}
+
+		l.order.Remove(e)
+		delete(l.byNum, num)
 	}
 
 	if f, err := os.Open(c.currentPath(num)); err == nil {
@@ -330,65 +402,38 @@ func (c *Cell) open(num int64) *os.File {
 		return f
 	}
 
-	c.fill.Lock()
-
-	defer c.fill.Unlock()
-
-	if f, err := os.Open(c.loadPath(num)); err == nil {
-		return f
-	}
-
 	buf := make([]byte, blockSize)
 
 	throw2(c.hdd.ReadAt(buf, num*blockSize))
 
 	tmp := c.loadPath(num) + ".tmp"
 
-	throw(os.WriteFile(tmp, buf, 0o644))
-	throw(os.Rename(tmp, c.loadPath(num)))
+	for {
+		err := os.WriteFile(tmp, buf, 0o644)
 
-	return throw2(os.Open(c.loadPath(num)))
-}
-
-func (c *Cell) sweeper() {
-	for range time.Tick(lruSweep) {
-		try(func() {
-			c.sweep()
-		}).catch(func(exc *Exception) {
-			slog.Error("cell: lru", "err", exc.error())
-		})
-	}
-}
-
-func (c *Cell) sweep() {
-	entries := throw2(os.ReadDir(c.load))
-
-	var total int64
-
-	infos := make([]os.FileInfo, 0, len(entries))
-
-	for _, entry := range entries {
-		info, err := entry.Info()
-
-		if err != nil || strings.HasSuffix(entry.Name(), ".tmp") {
-			continue
-		}
-
-		total += info.Size()
-		infos = append(infos, info)
-	}
-
-	sort.Slice(infos, func(i, j int) bool { return infos[i].ModTime().Before(infos[j].ModTime()) })
-
-	for _, info := range infos {
-		if total <= lruBudget {
+		if err == nil {
 			break
 		}
 
-		if os.Remove(filepath.Join(c.load, info.Name())) == nil {
-			total -= info.Size()
+		os.Remove(tmp)
+
+		if !errors.Is(err, syscall.ENOSPC) || l.order.Len() == 0 {
+			throw(err)
 		}
+
+		last := l.order.Back()
+		old := last.Value.(int64)
+
+		l.order.Remove(last)
+		delete(l.byNum, old)
+		throw(os.Remove(c.loadPath(old)))
 	}
+
+	throw(os.Rename(tmp, c.loadPath(num)))
+
+	l.byNum[num] = l.order.PushFront(num)
+
+	return throw2(os.Open(c.loadPath(num)))
 }
 
 func (c *Cell) status() (int64, int64) {
