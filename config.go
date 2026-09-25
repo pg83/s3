@@ -5,15 +5,15 @@ import (
 	"os"
 )
 
-type Cell struct {
+type CellSpec struct {
 	Id   int    `json:"id"`
 	Host string `json:"host"`
 	Addr string `json:"addr"`
 }
 
 type Config struct {
-	Etcd  []string `json:"etcd"`
-	Cells []Cell   `json:"cells"`
+	Etcd  []string   `json:"etcd"`
+	Cells []CellSpec `json:"cells"`
 }
 
 func loadConfig(path string) *Config {
