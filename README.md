@@ -223,5 +223,6 @@ binary, `S3_TEST_ETCD=/path/to/etcd` or `etcd` on PATH. `dev/stand.py`
 drives a live stand through a few hundred objects of mixed sizes: put,
 list, the flush to the HDD, reads from the HDD and then from the load,
 ranges, an overwrite, deletes one by one and in bulk, with timings;
-`--hosts` adds a look inside every cell over ssh. See `STYLE.md` for the code style
+`--hosts` adds a look inside every cell over ssh. Run it on a host
+against the local front to measure the stand rather than the way in. See `STYLE.md` for the code style
 and `CLAUDE.md` for the working conventions.

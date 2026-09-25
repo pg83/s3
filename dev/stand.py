@@ -6,6 +6,10 @@ bulk, and report every phase with its timing. Exits non-zero on the first
 byte that does not match.
 
     dev/stand.py --endpoint https://s3.lab.mesh --count 400 --hosts lab1,lab2,lab3
+
+Through the proxy the numbers measure the path to the lab, not the stand;
+for the stand itself copy the script to a host and point it at the local
+front, http://127.0.0.1:8093.
 """
 
 import argparse
