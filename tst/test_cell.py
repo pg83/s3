@@ -1,14 +1,15 @@
-"""A cell hands out offsets only for bytes on disk, serves them back from
-the SSD tail and from the HDD alike, survives a restart, and refuses to
-serve once the disk is full."""
+"""A cell hands out offsets only for bytes fsynced on the SSD, moves full
+2 MiB blocks to the HDD, serves bytes from the LRU, the ready blocks, the
+current block and the HDD alike, survives a restart, and refuses to serve
+once the disk is full."""
 
-import json
 import os
 import time
 
 import lib
 
 MB = 1 << 20
+BLOCK = 2 * MB
 
 cell = lib.Cell(hdd_bytes=32 * MB).start()
 c = cell.client()
@@ -19,7 +20,7 @@ if head != 0 or free != 32 * MB:
     lib.fail(f"fresh cell: head={head} free={free}")
 
 if c.read(0, 1) is not None:
-    lib.fail("read past the head of an empty cell must be refused")
+    lib.fail("read of an empty cell must be refused")
 
 small = b"hello, cell"
 big = os.urandom(3 * MB)
@@ -31,45 +32,50 @@ if o1 != 0 or o2 != len(small):
     lib.fail(f"offsets {o1} {o2}")
 
 if c.read(o1, len(small)) != small or c.read(o2, len(big)) != big:
-    lib.fail("read back from the tail differs")
+    lib.fail("read back differs")
 
 if c.read(o2 + len(big) - 1, 2) is not None:
     lib.fail("read across the head must be refused")
 
-# the mover copies the tail to the HDD and records how far it got
+# block 0 is full and goes to the HDD; block 1 is current
+ready = os.path.join(cell.ssd, "ready")
 deadline = time.time() + 10
 
-while time.time() < deadline:
-    try:
-        flushed = json.load(open(os.path.join(cell.ssd, "state")))["flushed"]
-    except (FileNotFoundError, ValueError):
-        flushed = 0
-
-    if flushed == o2 + len(big):
-        break
-
+while time.time() < deadline and (os.listdir(ready) or not os.path.exists(os.path.join(cell.ssd, "current.1"))):
     time.sleep(0.1)
-else:
-    lib.fail(f"mover never caught up: flushed={flushed}")
+
+if os.listdir(ready):
+    lib.fail(f"ready still holds {os.listdir(ready)}")
+
+log = small + big
 
 with open(cell.hdd, "rb") as f:
-    f.seek(o2)
+    if f.read(BLOCK) != log[:BLOCK]:
+        lib.fail("HDD does not hold block 0")
 
-    if f.read(len(big)) != big:
-        lib.fail("HDD does not hold the moved bytes")
+for name in os.listdir(os.path.join(cell.ssd, "lru")):
+    os.remove(os.path.join(cell.ssd, "lru", name))
 
 if c.read(o1, len(small)) != small or c.read(o2, len(big)) != big:
     lib.fail("read back from the HDD differs")
 
-o3 = c.append(b"after the move")
+if os.listdir(os.path.join(cell.ssd, "lru")) != ["0"]:
+    lib.fail(f"lru after an HDD read: {os.listdir(os.path.join(cell.ssd, 'lru'))}")
 
-if o3 != o2 + len(big):
-    lib.fail(f"offset after the move {o3}")
+o3 = c.append(b"after the block")
 
-if c.read(o2 + len(big) - 4, 4 + len(b"after the move")) != big[-4:] + b"after the move":
-    lib.fail("read spanning HDD and tail differs")
+if o3 != len(log):
+    lib.fail(f"offset after the block {o3}")
 
-# many small appends from several connections share fsyncs and stay ordered
+log += b"after the block"
+
+if c.read(BLOCK - 4, 8) != log[BLOCK - 4:BLOCK + 4]:
+    lib.fail("read across the block boundary differs")
+
+if c.read(o3 - 4, 4 + len(b"after the block")) != log[o3 - 4:]:
+    lib.fail("read spanning the HDD and the current block differs")
+
+# many small appends from several connections share one tick and stay in order
 clients = [cell.client() for _ in range(4)]
 offsets = []
 
@@ -77,7 +83,7 @@ for i in range(200):
     offsets.append((clients[i % 4].append(b"x" * (i + 1)), i + 1))
 
 offsets.sort()
-expect = o3 + len(b"after the move")
+expect = len(log)
 
 for off, n in offsets:
     if off != expect:

@@ -15,15 +15,17 @@ read(offset, len)   -> data
 status()            -> head, free
 ```
 
-Inside, a cell is an append-only log. New data goes to a tail file on
-the SSD; appends that arrive within a few milliseconds are written back
-to back and share one fsync, and the offset is handed out only after
-that fsync, so an offset in hand means bytes on disk. A mover copies
-the finished part of the tail to the raw HDD sequentially, which is the
-one write pattern a shingled drive is good at. A cell keeps three
-numbers of state: the head of the log, how far the HDD holds, and where
-live data begins. There is no index and no checksum in the cell; the
-bytes are the front's to interpret.
+Inside, a cell is an append-only log cut into 2 MiB blocks, and the
+offset is the position in that log. New data goes into `current.<n>` on
+the SSD: a writer wakes every 100 ms, writes everything that arrived
+since the last tick, fsyncs once and only then answers with the offsets.
+A block that is full is renamed into `ready/`; a second goroutine copies
+ready blocks to the raw HDD at `n * 2 MiB`, fsyncs and removes them.
+Readers ask nobody: a block is opened from `lru/`, else hard-linked there
+from `ready/`, else read from `current.<n>`, else copied from the HDD
+into `lru/` under the one lock the cell has. `lru/` is swept by age
+past its budget. No index, no checksum; the bytes are the front's to
+interpret.
 
 A cell that runs out of space starts, does not open its port and exits.
 Refilling an empty cell from the other two hosts is the compaction.

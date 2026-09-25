@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -12,16 +11,16 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
 
 const (
-	tailRoll     = 256 << 20
-	batchWait    = 2 * time.Millisecond
-	batchLimit   = 1024
-	moveEvery    = 100 * time.Millisecond
-	moveChunk    = 4 << 20
+	blockSize    = 2 << 20
+	tick         = 100 * time.Millisecond
+	lruBudget    = 1 << 30
+	lruSweep     = 10 * time.Second
 	minFree      = 1 << 20
 	statusOk     = 0
 	statusFull   = 1
@@ -36,44 +35,26 @@ const (
 var errFull = errors.New("cell: full")
 var errRange = errors.New("cell: past the head")
 
-type Tail struct {
-	base int64
-	size int64
-	file *os.File
-}
-
-type AppendReq struct {
+type WriteReq struct {
 	data []byte
-	done chan AppendResp
+	done chan WriteResp
 }
 
-type AppendResp struct {
+type WriteResp struct {
 	offset int64
 	err    error
 }
 
-type Snapshot struct {
-	head    int64
-	durable int64
-	flushed int64
-	tails   []Tail
-}
-
 type Cell struct {
-	ssd       string
-	hdd       *os.File
-	capacity  int64
-	appends   chan AppendReq
-	snapshots chan chan Snapshot
-	moved     chan int64
-	head      int64
-	durable   int64
-	flushed   int64
-	tails     []Tail
-}
-
-type CellState struct {
-	Flushed int64 `json:"flushed"`
+	ssd      string
+	hdd      *os.File
+	capacity int64
+	writes   chan WriteReq
+	ready    chan struct{}
+	fill     sync.Mutex
+	num      int64
+	current  *os.File
+	size     int64
 }
 
 func runCell(listen, ssd, hdd string) {
@@ -83,16 +64,17 @@ func runCell(listen, ssd, hdd string) {
 
 	c := openCell(ssd, hdd)
 
-	if c.capacity-c.head < minFree {
-		throwFmt("cell: %s is full (%d of %d bytes used), not serving", hdd, c.head, c.capacity)
+	if c.capacity-c.head() < minFree {
+		throwFmt("cell: %s is full (%d of %d bytes used), not serving", hdd, c.head(), c.capacity)
 	}
 
 	ln := throw2(net.Listen("tcp", listen))
 
-	slog.Info("cell: serving", "listen", listen, "head", c.head, "flushed", c.flushed, "capacity", c.capacity)
+	slog.Info("cell: serving", "listen", listen, "block", c.num, "head", c.head(), "capacity", c.capacity)
 
-	go c.owner()
-	go c.mover()
+	go c.writer()
+	go c.flusher()
+	go c.sweeper()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
@@ -116,284 +98,222 @@ func runCell(listen, ssd, hdd string) {
 }
 
 func openCell(ssd, hdd string) *Cell {
-	throw(os.MkdirAll(ssd, 0o755))
+	for _, d := range []string{ssd, filepath.Join(ssd, "ready"), filepath.Join(ssd, "lru")} {
+		throw(os.MkdirAll(d, 0o755))
+	}
 
 	dev := throw2(os.OpenFile(hdd, os.O_RDWR, 0))
-	capacity := throw2(dev.Seek(0, io.SeekEnd))
 
 	c := &Cell{
-		ssd:       ssd,
-		hdd:       dev,
-		capacity:  capacity,
-		appends:   make(chan AppendReq, batchLimit),
-		snapshots: make(chan chan Snapshot),
-		moved:     make(chan int64),
+		ssd:      ssd,
+		hdd:      dev,
+		capacity: throw2(dev.Seek(0, io.SeekEnd)),
+		writes:   make(chan WriteReq, 4096),
+		ready:    make(chan struct{}, 1),
 	}
 
-	c.flushed = c.loadState()
-	c.tails = c.openTails()
-	c.head = c.flushed
+	c.num = c.lastBlock()
+	c.openCurrent()
 
-	if n := len(c.tails); n > 0 {
-		c.head = c.tails[n-1].base + c.tails[n-1].size
+	if c.size == blockSize {
+		c.roll()
 	}
-
-	c.durable = c.head
 
 	return c
 }
 
-func (c *Cell) statePath() string {
-	return filepath.Join(c.ssd, "state")
+func (c *Cell) currentPath(num int64) string {
+	return filepath.Join(c.ssd, "current."+strconv.FormatInt(num, 10))
 }
 
-func (c *Cell) loadState() int64 {
-	data, err := os.ReadFile(c.statePath())
-
-	if errors.Is(err, os.ErrNotExist) {
-		return 0
-	}
-
-	throw(err)
-
-	st := CellState{}
-
-	throw(json.Unmarshal(data, &st))
-
-	return st.Flushed
+func (c *Cell) readyPath(num int64) string {
+	return filepath.Join(c.ssd, "ready", strconv.FormatInt(num, 10))
 }
 
-func (c *Cell) saveState(flushed int64) {
-	tmp := c.statePath() + ".tmp"
-	f := throw2(os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644))
-
-	throw2(f.Write(throw2(json.Marshal(CellState{Flushed: flushed}))))
-	throw(f.Sync())
-	throw(f.Close())
-	throw(os.Rename(tmp, c.statePath()))
+func (c *Cell) lruPath(num int64) string {
+	return filepath.Join(c.ssd, "lru", strconv.FormatInt(num, 10))
 }
 
-func tailPath(ssd string, base int64) string {
-	return filepath.Join(ssd, "tail-"+strconv.FormatInt(base, 10))
-}
+func blockNumbers(dir, prefix string) []int64 {
+	var nums []int64
 
-func (c *Cell) openTails() []Tail {
-	var tails []Tail
-
-	for _, entry := range throw2(os.ReadDir(c.ssd)) {
+	for _, entry := range throw2(os.ReadDir(dir)) {
 		name := entry.Name()
 
-		if !strings.HasPrefix(name, "tail-") {
+		if !strings.HasPrefix(name, prefix) || strings.HasSuffix(name, ".tmp") {
 			continue
 		}
 
-		base := throw2(strconv.ParseInt(strings.TrimPrefix(name, "tail-"), 10, 64))
-		path := filepath.Join(c.ssd, name)
-		size := throw2(entry.Info()).Size()
-
-		if base+size <= c.flushed {
-			throw(os.Remove(path))
-
-			continue
-		}
-
-		tails = append(tails, Tail{base: base, size: size, file: throw2(os.OpenFile(path, os.O_RDWR, 0))})
+		nums = append(nums, throw2(strconv.ParseInt(strings.TrimPrefix(name, prefix), 10, 64)))
 	}
 
-	sort.Slice(tails, func(i, j int) bool { return tails[i].base < tails[j].base })
+	sort.Slice(nums, func(i, j int) bool { return nums[i] < nums[j] })
 
-	next := c.flushed
+	return nums
+}
 
-	for _, t := range tails {
-		if t.base > next {
-			throwFmt("cell: gap in the log between %d and %d", next, t.base)
-		}
+func (c *Cell) lastBlock() int64 {
+	var num int64
 
-		next = t.base + t.size
+	for _, n := range blockNumbers(filepath.Join(c.ssd, "ready"), "") {
+		num = max(num, n+1)
 	}
 
-	return tails
+	for _, n := range blockNumbers(c.ssd, "current.") {
+		num = max(num, n)
+	}
+
+	return num
+}
+
+func (c *Cell) openCurrent() {
+	c.current = throw2(os.OpenFile(c.currentPath(c.num), os.O_RDWR|os.O_CREATE, 0o644))
+	c.size = throw2(c.current.Stat()).Size()
+
+	if c.size > blockSize {
+		throwFmt("cell: %s is %d bytes, longer than a block", c.currentPath(c.num), c.size)
+	}
+}
+
+func syncDir(path string) {
+	d := throw2(os.Open(path))
+
+	throw(d.Sync())
+	throw(d.Close())
+}
+
+func (c *Cell) roll() {
+	throw(c.current.Sync())
+	throw(c.current.Close())
+	throw(os.Rename(c.currentPath(c.num), c.readyPath(c.num)))
+	syncDir(filepath.Join(c.ssd, "ready"))
+
+	c.num++
+	c.openCurrent()
+	syncDir(c.ssd)
+
+	select {
+	case c.ready <- struct{}{}:
+	default:
+	}
+}
+
+func (c *Cell) head() int64 {
+	var head int64
+
+	for _, n := range blockNumbers(c.ssd, "current.") {
+		head = n*blockSize + throw2(os.Stat(c.currentPath(n))).Size()
+	}
+
+	return head
 }
 
 func (c *Cell) append(data []byte) (int64, error) {
-	done := make(chan AppendResp, 1)
-	c.appends <- AppendReq{data: data, done: done}
+	done := make(chan WriteResp, 1)
+	c.writes <- WriteReq{data: data, done: done}
 	resp := <-done
 
 	return resp.offset, resp.err
 }
 
-func (c *Cell) snapshot() Snapshot {
-	reply := make(chan Snapshot, 1)
-	c.snapshots <- reply
+func (c *Cell) writer() {
+	for range time.Tick(tick) {
+		var batch []WriteReq
 
-	return <-reply
-}
+	drain:
+		for {
+			select {
+			case req := <-c.writes:
+				batch = append(batch, req)
+			default:
+				break drain
+			}
+		}
 
-func (c *Cell) owner() {
-	for {
-		select {
-		case first := <-c.appends:
-			c.commit(first)
-		case reply := <-c.snapshots:
-			reply <- Snapshot{head: c.head, durable: c.durable, flushed: c.flushed, tails: append([]Tail(nil), c.tails...)}
-		case to := <-c.moved:
-			c.forget(to)
+		if len(batch) == 0 {
+			continue
+		}
+
+		resps := make([]WriteResp, len(batch))
+
+		for i, req := range batch {
+			resps[i].offset, resps[i].err = c.put(req.data)
+		}
+
+		throw(c.current.Sync())
+
+		for i, req := range batch {
+			req.done <- resps[i]
 		}
 	}
 }
 
-func (c *Cell) commit(first AppendReq) {
-	batch := []AppendReq{first}
-	deadline := time.After(batchWait)
+func (c *Cell) put(data []byte) (int64, error) {
+	offset := c.num*blockSize + c.size
 
-collect:
-	for len(batch) < batchLimit {
-		select {
-		case req := <-c.appends:
-			batch = append(batch, req)
-		case <-deadline:
-			break collect
-		}
-	}
-
-	resps := make([]AppendResp, len(batch))
-	touched := map[*os.File]bool{}
-
-	for i, req := range batch {
-		resps[i].offset, resps[i].err = c.write(req.data, touched)
-	}
-
-	for f := range touched {
-		throw(f.Sync())
-	}
-
-	c.durable = c.head
-
-	for i, req := range batch {
-		req.done <- resps[i]
-	}
-}
-
-func (c *Cell) write(data []byte, touched map[*os.File]bool) (int64, error) {
-	if c.head+int64(len(data)) > c.capacity {
+	if offset+int64(len(data)) > c.capacity {
 		return 0, errFull
 	}
 
-	if n := len(c.tails); n == 0 || c.tails[n-1].size >= tailRoll {
-		file := throw2(os.OpenFile(tailPath(c.ssd, c.head), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o644))
-		c.tails = append(c.tails, Tail{base: c.head, file: file})
+	for len(data) > 0 {
+		n := min(int64(len(data)), blockSize-c.size)
+
+		throw2(c.current.WriteAt(data[:n], c.size))
+
+		c.size += n
+		data = data[n:]
+
+		if c.size == blockSize {
+			c.roll()
+		}
 	}
-
-	current := &c.tails[len(c.tails)-1]
-
-	throw2(current.file.WriteAt(data, current.size))
-
-	offset := c.head
-	current.size += int64(len(data))
-	c.head += int64(len(data))
-	touched[current.file] = true
 
 	return offset, nil
 }
 
-func (c *Cell) forget(to int64) {
-	c.flushed = to
-
-	var keep []Tail
-
-	for i, t := range c.tails {
-		if t.base+t.size <= to && i < len(c.tails)-1 {
-			t.file.Close()
-			throw(os.Remove(tailPath(c.ssd, t.base)))
-		} else {
-			keep = append(keep, t)
-		}
-	}
-
-	c.tails = keep
-}
-
-func (c *Cell) mover() {
-	for range time.Tick(moveEvery) {
-		try(func() {
-			c.move()
-		}).catch(func(exc *Exception) {
-			slog.Error("cell: mover", "err", exc.error())
-		})
+func (c *Cell) flusher() {
+	for {
+		c.flush()
+		<-c.ready
 	}
 }
 
-func (c *Cell) move() {
-	snap := c.snapshot()
+func (c *Cell) flush() {
+	buf := make([]byte, blockSize)
 
-	if snap.flushed == snap.durable {
-		return
+	for _, num := range blockNumbers(filepath.Join(c.ssd, "ready"), "") {
+		f := throw2(os.Open(c.readyPath(num)))
+
+		throw2(io.ReadFull(f, buf))
+		throw(f.Close())
+		throw2(c.hdd.WriteAt(buf, num*blockSize))
+		throw(c.hdd.Sync())
+		throw(os.Remove(c.readyPath(num)))
 	}
 
-	buf := make([]byte, moveChunk)
-
-	for off := snap.flushed; off < snap.durable; {
-		t := tailAt(snap.tails, off)
-		n := min(int64(len(buf)), t.base+t.size-off, snap.durable-off)
-
-		throw2(t.file.ReadAt(buf[:n], off-t.base))
-		throw2(c.hdd.WriteAt(buf[:n], off))
-
-		off += n
-	}
-
-	throw(c.hdd.Sync())
-	c.saveState(snap.durable)
-	c.moved <- snap.durable
-}
-
-func tailAt(tails []Tail, off int64) Tail {
-	for _, t := range tails {
-		if off >= t.base && off < t.base+t.size {
-			return t
-		}
-	}
-
-	throwFmt("cell: offset %d is in no tail", off)
-
-	return Tail{}
+	syncDir(filepath.Join(c.ssd, "ready"))
 }
 
 func (c *Cell) read(off int64, n int64) ([]byte, error) {
-	for attempt := 0; ; attempt++ {
-		out, err := c.readFrom(c.snapshot(), off, n)
-
-		if errors.Is(err, os.ErrClosed) && attempt == 0 {
-			continue
-		}
-
-		return out, err
-	}
-}
-
-func (c *Cell) readFrom(snap Snapshot, off int64, n int64) ([]byte, error) {
-	if off < 0 || n < 0 || off+n > snap.durable {
+	if off < 0 || n < 0 || off+n > c.capacity {
 		return nil, errRange
 	}
 
 	out := make([]byte, n)
 
 	for pos := off; pos < off+n; {
-		end := off + n
+		num := pos / blockSize
+		end := min(off+n, (num+1)*blockSize)
+		f := c.open(num)
+		_, err := f.ReadAt(out[pos-off:end-off], pos-num*blockSize)
 
-		if pos < snap.flushed {
-			end = min(end, snap.flushed)
+		throw(f.Close())
 
-			throw2(c.hdd.ReadAt(out[pos-off:end-off], pos))
-		} else {
-			t := tailAt(snap.tails, pos)
-			end = min(end, t.base+t.size)
-
-			if _, err := t.file.ReadAt(out[pos-off:end-off], pos-t.base); err != nil {
-				return nil, err
-			}
+		if errors.Is(err, io.EOF) {
+			return nil, errRange
 		}
+
+		throw(err)
 
 		pos = end
 	}
@@ -401,8 +321,85 @@ func (c *Cell) readFrom(snap Snapshot, off int64, n int64) ([]byte, error) {
 	return out, nil
 }
 
-func (c *Cell) status() (int64, int64) {
-	snap := c.snapshot()
+func (c *Cell) open(num int64) *os.File {
+	if f, err := os.Open(c.lruPath(num)); err == nil {
+		os.Chtimes(c.lruPath(num), time.Now(), time.Now())
 
-	return snap.durable, c.capacity - snap.head
+		return f
+	}
+
+	if err := os.Link(c.readyPath(num), c.lruPath(num)); err == nil || errors.Is(err, os.ErrExist) {
+		if f, err := os.Open(c.lruPath(num)); err == nil {
+			return f
+		}
+	}
+
+	if f, err := os.Open(c.currentPath(num)); err == nil {
+		return f
+	}
+
+	c.fill.Lock()
+	defer c.fill.Unlock()
+
+	if f, err := os.Open(c.lruPath(num)); err == nil {
+		return f
+	}
+
+	buf := make([]byte, blockSize)
+
+	throw2(c.hdd.ReadAt(buf, num*blockSize))
+
+	tmp := c.lruPath(num) + ".tmp"
+
+	throw(os.WriteFile(tmp, buf, 0o644))
+	throw(os.Rename(tmp, c.lruPath(num)))
+
+	return throw2(os.Open(c.lruPath(num)))
+}
+
+func (c *Cell) sweeper() {
+	for range time.Tick(lruSweep) {
+		try(func() {
+			c.sweep()
+		}).catch(func(exc *Exception) {
+			slog.Error("cell: lru", "err", exc.error())
+		})
+	}
+}
+
+func (c *Cell) sweep() {
+	dir := filepath.Join(c.ssd, "lru")
+	entries := throw2(os.ReadDir(dir))
+
+	var total int64
+	infos := make([]os.FileInfo, 0, len(entries))
+
+	for _, entry := range entries {
+		info, err := entry.Info()
+
+		if err != nil {
+			continue
+		}
+
+		total += info.Size()
+		infos = append(infos, info)
+	}
+
+	sort.Slice(infos, func(i, j int) bool { return infos[i].ModTime().Before(infos[j].ModTime()) })
+
+	for _, info := range infos {
+		if total <= lruBudget {
+			break
+		}
+
+		if os.Remove(filepath.Join(dir, info.Name())) == nil {
+			total -= info.Size()
+		}
+	}
+}
+
+func (c *Cell) status() (int64, int64) {
+	head := c.head()
+
+	return head, c.capacity - head
 }
