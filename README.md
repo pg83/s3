@@ -22,7 +22,10 @@ reads and writes do not fight over one: `-store` takes the writes,
 store: a writer wakes every 100 ms, writes everything that arrived
 since the last tick, fsyncs once and only then answers with the offsets.
 A block that is full is renamed to plain `<n>`; a second goroutine
-copies those to the raw HDD at `n * 2 MiB`, fsyncs and removes them. The HDD is opened with `O_DIRECT`, so neither the copies
+copies those to the raw HDD at `n * 2 MiB`, fsyncs and removes them.
+A store with no room left is the HDD falling behind: the writer waits
+for the flusher to free a block and writes again, and everything above
+it waits in turn. The HDD is opened with `O_DIRECT`, so neither the copies
 out nor the copies back pass through the page cache; every block is
 2 MiB at a 2 MiB offset from a page-aligned buffer, one per goroutine. A reader asks the load's one owner goroutine for its
 block and gets an open file back: a copy in the load, else
@@ -61,8 +64,10 @@ nothing about objects, and no table maps ids to disks.
 
 ## Write
 
-The front reads the whole body into memory, computing its md5 on the
-way, then appends the three pieces to their three hosts at once, each
+The front reads the whole body into memory, a bounded number of bodies
+at a time so that clients past that wait in their own sockets,
+computing its md5 on the way, then appends the three pieces to their
+three hosts at once, each
 into a cell of its host picked at random; a cell that is full sends the
 piece to the next cell of the same host, a host whose cell is down is
 left owing the piece. Nothing is retried: the outcome of every append
@@ -138,9 +143,10 @@ frame:   len u32 | op u8 | body            len counts op and body
 1 append     id u64 | data                 -> 0x81  id | offset u64
 2 read       id u64 | offset u64 | n u32   -> 0x82  id | data
 3 status     id u64                        -> 0x83  id | head u64, free u64
+4 cancel     id u64 | target u64           -> nothing
                                            -> 0xff  id | code u8
 
-code: 1 full, 2 past the head, 3 io error
+code: 1 full, 2 past the head, 3 io error, 4 cancelled
 ```
 
 The goroutine owns the connection and the table of messages it has
@@ -153,9 +159,19 @@ means the cell is not there: then everything in the table gets
 operation. While the link is down a message arriving on the channel
 prompts a connect right away, so the answer is as fresh as the last
 attempt, never a timer. Nothing is shared, nothing is locked, nothing
-is retried below the operation. On the cell every frame is handled in
-its own goroutine, so appends from one connection land in one tick and
-one fsync, and a writer goroutine serializes the replies.
+is retried below the operation.
+
+On the cell the connection's reader puts every append straight into
+the writer's queue and blocks when the queue is full, so it stops
+reading the socket, the window closes and the front waits; reads and
+status get a goroutine each. The writer answers into the connection's
+channel of replies and a goroutine per connection serializes them to
+the socket, draining what is left for a dead peer so the writer never
+stalls on one. A cancel names the id of an earlier message and rides
+the same queue behind it: the writer drops the append if it is still
+in the tick's batch, and a front sends one for everything an operation
+was waiting for when its client walks away, so nothing is written for
+somebody who is no longer there.
 
 Cells and fronts talk over the storage network, which is private; there
 is no authentication and no encryption on this link. The code speaks

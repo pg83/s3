@@ -4,6 +4,7 @@ current block and the HDD alike, survives a restart, and refuses to serve
 once the disk is full."""
 
 import os
+import struct
 import time
 
 import lib
@@ -94,6 +95,34 @@ for cl in clients:
     cl.close()
 
 c.close()
+
+# a cancel that reaches the writer before the tick drops the append
+c = cell.client()
+head, _ = c.status()
+dropped = False
+
+for attempt in range(20):
+    i1 = c.send(lib.OP_APPEND, b"never mind")
+    c.send(lib.OP_CANCEL, struct.pack(">Q", i1))
+    rid, rop, body = c.recv()
+
+    if rid != i1:
+        lib.fail(f"reply {rid} for append {i1}")
+
+    if rop == lib.OP_FAIL and body == bytes([lib.CODE_CANCELLED]):
+        dropped = True
+        break
+
+    if rop != lib.OP_APPEND | lib.OP_REPLY:
+        lib.fail(f"cancelled append answered op {rop} {body!r}")
+
+    head += len(b"never mind")
+
+if not dropped:
+    lib.fail("twenty append+cancel pairs, none dropped")
+
+if c.status()[0] != head:
+    lib.fail(f"head {c.status()[0]} after cancels, expected {head}")
 
 # a restart keeps everything that was acknowledged
 if cell.stop() != 0:

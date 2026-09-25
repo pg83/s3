@@ -92,7 +92,7 @@ func (r *Repairer) fix(bucket, key string) {
 	throw(err)
 
 	mine := r.pieceOf(bucket, key, m)
-	have := r.store.fetchAll(m.Pieces, pieceLen(m.Size))
+	have, _ := r.store.fetchAll(nil, m.Pieces, pieceLen(m.Size))
 
 	if sound(have, m) {
 		r.drop(bucket, key)
@@ -110,7 +110,8 @@ func (r *Repairer) fix(bucket, key string) {
 		throwFmt("repair: %s/%s: the other two pieces do not rebuild the md5", bucket, key)
 	}
 
-	p, ok := r.store.place(map[int][]byte{mine: have[mine]}, map[int]string{mine: r.host})[mine]
+	placed, _ := r.store.place(nil, map[int][]byte{mine: have[mine]}, map[int]string{mine: r.host})
+	p, ok := placed[mine]
 
 	if !ok {
 		throwFmt("repair: %s/%s: no cell of %s took the piece", bucket, key, r.host)

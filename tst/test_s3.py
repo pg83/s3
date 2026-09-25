@@ -7,6 +7,7 @@ a corrupt piece are both served through the parity."""
 import http.client
 import json
 import os
+import socket
 import time
 import xml.etree.ElementTree as ET
 
@@ -113,6 +114,17 @@ for key in burst:
     m = etcd.manifest("burst", key)
     if len(m["pieces"]) != 3:
         lib.fail(f"burst {key} landed on {len(m['pieces'])} pieces")
+
+# a client that walks away mid-request leaves the front intact
+gone = socket.create_connection(("127.0.0.1", cluster.front_port))
+gone.sendall(b"PUT /burst/walkaway HTTP/1.1\r\nHost: x\r\nContent-Length: 3000000\r\n\r\n" + os.urandom(1000000))
+gone.close()
+status, _, _ = s3.request("PUT", "/burst/still-here", b"here")
+if status != 200:
+    lib.fail(f"put after a client walked away: {status}")
+status, _, body = s3.request("GET", "/burst/still-here")
+if status != 200 or body != b"here":
+    lib.fail(f"get after a client walked away: {status}")
 
 # listing
 def listing(query):

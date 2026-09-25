@@ -17,6 +17,7 @@ var (
 	errTooFewCells = errors.New("store: fewer than two cells took the object")
 	errUnreadable  = errors.New("store: no combination of pieces matches the md5")
 	errNoSuchKey   = errors.New("store: no such key")
+	errClientGone  = errors.New("store: the client left")
 )
 
 type Piece struct {
@@ -135,7 +136,7 @@ type placing struct {
 	cell  int
 }
 
-func (s *Store) place(pieces map[int][]byte, hosts map[int]string) map[int]Piece {
+func (s *Store) place(gone <-chan struct{}, pieces map[int][]byte, hosts map[int]string) (map[int]Piece, bool) {
 	reply := make(chan outcome, len(pieces)*len(s.byId))
 	plan := map[int]*placing{}
 	placed := map[int]Piece{}
@@ -168,7 +169,17 @@ func (s *Store) place(pieces map[int][]byte, hosts map[int]string) map[int]Piece
 	}
 
 	for pending > 0 {
-		o := <-reply
+		var o outcome
+
+		select {
+		case o = <-reply:
+		case <-gone:
+			for _, p := range plan {
+				s.links[p.cell].cancel(reply)
+			}
+
+			return placed, false
+		}
 
 		pending--
 
@@ -187,10 +198,10 @@ func (s *Store) place(pieces map[int][]byte, hosts map[int]string) map[int]Piece
 		}
 	}
 
-	return placed
+	return placed, true
 }
 
-func (s *Store) put(bucket, key string, data []byte, contentType string) (Manifest, error) {
+func (s *Store) put(gone <-chan struct{}, bucket, key string, data []byte, contentType string) (Manifest, error) {
 	m := Manifest{Size: int64(len(data)), Md5: md5hex(data), Mtime: time.Now().UTC(), ContentType: contentType}
 
 	var owing []string
@@ -205,7 +216,11 @@ func (s *Store) put(bucket, key string, data []byte, contentType string) (Manife
 			want[i] = pieces[i]
 		}
 
-		placed := s.place(want, hosts)
+		placed, stayed := s.place(gone, want, hosts)
+
+		if !stayed {
+			return m, errClientGone
+		}
 
 		for i := range 3 {
 			if p, ok := placed[i]; ok {
@@ -249,7 +264,7 @@ func (s *Store) manifest(bucket, key string) (Manifest, int64, error) {
 	return m, entry.rev, nil
 }
 
-func (s *Store) fetchAll(pieces []Piece, n int64) [3][]byte {
+func (s *Store) fetchAll(gone <-chan struct{}, pieces []Piece, n int64) ([3][]byte, bool) {
 	reply := make(chan outcome, len(pieces))
 	have := [3][]byte{}
 	sent := 0
@@ -267,7 +282,20 @@ func (s *Store) fetchAll(pieces []Piece, n int64) [3][]byte {
 	}
 
 	for range sent {
-		o := <-reply
+		var o outcome
+
+		select {
+		case o = <-reply:
+		case <-gone:
+			for _, p := range pieces {
+				if l, known := s.links[p.Cell]; known {
+					l.cancel(reply)
+				}
+			}
+
+			return have, false
+		}
+
 		data, err := readOut(o)
 
 		if err != nil {
@@ -279,10 +307,10 @@ func (s *Store) fetchAll(pieces []Piece, n int64) [3][]byte {
 		have[o.tag] = data
 	}
 
-	return have
+	return have, true
 }
 
-func (s *Store) get(bucket, key string, m Manifest) ([]byte, error) {
+func (s *Store) get(gone <-chan struct{}, bucket, key string, m Manifest) ([]byte, error) {
 	if m.Size == 0 {
 		return nil, nil
 	}
@@ -302,7 +330,12 @@ func (s *Store) get(bucket, key string, m Manifest) ([]byte, error) {
 		}
 	}
 
-	have := s.fetchAll(halves, n)
+	have, stayed := s.fetchAll(gone, halves, n)
+
+	if !stayed {
+		return nil, errClientGone
+	}
+
 	both := have[0] != nil && have[1] != nil
 
 	if both {
@@ -312,7 +345,13 @@ func (s *Store) get(bucket, key string, m Manifest) ([]byte, error) {
 	}
 
 	if p, ok := byIndex[2]; ok {
-		have[2] = s.fetchAll([]Piece{p}, n)[2]
+		parity, stayed := s.fetchAll(gone, []Piece{p}, n)
+
+		if !stayed {
+			return nil, errClientGone
+		}
+
+		have[2] = parity[2]
 	}
 
 	if have[2] != nil {

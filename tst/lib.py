@@ -15,9 +15,9 @@ import time
 
 BINARY = os.environ.get("S3_TEST_BINARY") or os.path.join(os.path.dirname(__file__), "..", "s3")
 
-OP_APPEND, OP_READ, OP_STATUS = 1, 2, 3
+OP_APPEND, OP_READ, OP_STATUS, OP_CANCEL = 1, 2, 3, 4
 OP_REPLY, OP_FAIL = 0x80, 0xff
-CODE_FULL, CODE_RANGE, CODE_IO = 1, 2, 3
+CODE_FULL, CODE_RANGE, CODE_IO, CODE_CANCELLED = 1, 2, 3, 4
 
 
 def run(*args, check=False):
@@ -107,13 +107,24 @@ class Client:
     def close(self):
         self.sock.close()
 
-    def call(self, op, payload=b""):
+    def send(self, op, payload=b""):
         self.next_id += 1
         body = struct.pack(">BQ", op, self.next_id) + payload
         self.sock.sendall(struct.pack(">I", len(body)) + body)
+
+        return self.next_id
+
+    def recv(self):
         n, = struct.unpack(">I", self._recv(4))
         reply = self._recv(n)
         rop, rid = struct.unpack(">BQ", reply[:9])
+
+        return rid, rop, reply[9:]
+
+    def call(self, op, payload=b""):
+        self.send(op, payload)
+        rid, rop, rest = self.recv()
+        reply = struct.pack(">BQ", rop, rid) + rest
 
         if rid != self.next_id:
             fail(f"reply id {rid} for request {self.next_id}")

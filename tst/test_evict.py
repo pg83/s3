@@ -1,9 +1,12 @@
 """The load is a cache the cell fills from the HDD and empties only when a
 copy does not fit: on a 7 MiB tmpfs three 2 MiB copies stay and the least
-recently read one goes when a fourth is needed. Needs an unprivileged
-user namespace for the tmpfs; without one the scenario skips."""
+recently read one goes when a fourth is needed. A store that runs out of
+room makes the writer wait for the flusher instead of dying: on a tmpfs
+barely bigger than one block every append still lands. Needs an
+unprivileged user namespace for the tmpfs; without one the scenario skips."""
 
 import os
+import struct
 import subprocess
 import sys
 import tempfile
@@ -68,5 +71,35 @@ if cached() != [0, 3, 5]:
 for i, data in enumerate(blocks):
     if c.read(i * BLOCK + 100, 1000) != data[100:1100]:
         lib.fail(f"block {i} slice differs after evictions")
+
+# the store runs out of room: the writer waits for the flusher
+tight = tempfile.mkdtemp(prefix="s3tight-")
+store = os.path.join(tight, "store")
+os.mkdir(store)
+subprocess.run(["mount", "-t", "tmpfs", "-o", "size=2100k", "tmpfs", store], check=True)
+
+cell = lib.Cell(hdd_bytes=32 * MB, root=tight).start()
+c = cell.client()
+pieces = [os.urandom(MB) for _ in range(6)]
+log = b"".join(pieces)
+ids = [c.send(lib.OP_APPEND, piece) for piece in pieces]
+
+for want, piece_id in enumerate(ids):
+    rid, rop, body = c.recv()
+
+    if rid != piece_id or rop != lib.OP_APPEND | lib.OP_REPLY or struct.unpack(">Q", body)[0] != want * MB:
+        lib.fail(f"append {want} into a tight store: id {rid} op {rop} {body!r}")
+
+if c.status()[0] != len(log):
+    lib.fail(f"head {c.status()[0]} in a tight store, expected {len(log)}")
+
+for off in (0, 3 * MB - 7, 5 * MB + 1):
+    if c.read(off, 100) != log[off:off + 100]:
+        lib.fail(f"read at {off} from a tight store differs")
+
+cell.stop()
+
+if "waiting for the flusher" not in cell.proc.stderr.read():
+    lib.fail("the tight store never made the writer wait")
 
 print("ok")

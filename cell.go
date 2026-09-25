@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
@@ -29,16 +30,19 @@ const (
 	minFree      = 1 << 20
 	maxFrameSize = 1 << 31
 	ioAlign      = 4096
+	writesQueue  = 1024
 )
 
 type WriteReq struct {
-	data []byte
-	done chan WriteResp
+	id     uint64
+	data   []byte
+	cancel bool
+	out    chan reply
 }
 
-type WriteResp struct {
-	offset int64
-	err    error
+type reqKey struct {
+	out chan reply
+	id  uint64
 }
 
 type ReadReq struct {
@@ -59,6 +63,7 @@ type Cell struct {
 	writes   chan WriteReq
 	reads    chan ReadReq
 	ready    chan struct{}
+	freed    chan struct{}
 	num      int64
 	current  *os.File
 	size     int64
@@ -111,9 +116,10 @@ func openCell(load, store, hdd string) *Cell {
 		store:    store,
 		hdd:      dev,
 		capacity: throw2(dev.Seek(0, io.SeekEnd)),
-		writes:   make(chan WriteReq, 4096),
+		writes:   make(chan WriteReq, writesQueue),
 		reads:    make(chan ReadReq, 4096),
 		ready:    make(chan struct{}, 1),
+		freed:    make(chan struct{}, 1),
 	}
 
 	c.num = c.lastBlock()
@@ -213,16 +219,6 @@ func (c *Cell) head() int64 {
 	return head
 }
 
-func (c *Cell) append(data []byte) (int64, error) {
-	done := make(chan WriteResp, 1)
-
-	c.writes <- WriteReq{data: data, done: done}
-
-	resp := <-done
-
-	return resp.offset, resp.err
-}
-
 func (c *Cell) writer() {
 	for range time.Tick(tick) {
 		var batch []WriteReq
@@ -241,18 +237,45 @@ func (c *Cell) writer() {
 			continue
 		}
 
-		resps := make([]WriteResp, len(batch))
+		cancelled := map[reqKey]bool{}
+
+		for _, req := range batch {
+			if req.cancel {
+				cancelled[reqKey{req.out, req.id}] = true
+			}
+		}
+
+		replies := make([]reply, len(batch))
 
 		for i, req := range batch {
-			resps[i].offset, resps[i].err = c.put(req.data)
+			switch {
+			case req.cancel:
+				replies[i] = reply{op: opCancel | opReply, id: req.id, silent: true}
+			case cancelled[reqKey{req.out, req.id}]:
+				replies[i] = reply{op: opFail, id: req.id, body: []byte{codeCancelled}}
+			default:
+				offset, err := c.put(req.data)
+
+				replies[i] = c.appendReply(req.id, offset, err)
+			}
 		}
 
 		throw(c.current.Sync())
 
 		for i, req := range batch {
-			req.done <- resps[i]
+			req.out <- replies[i]
 		}
 	}
+}
+
+func (c *Cell) appendReply(id uint64, offset int64, err error) reply {
+	if errors.Is(err, errFull) {
+		return reply{op: opFail, id: id, body: []byte{codeFull}}
+	}
+
+	throw(err)
+
+	return reply{op: opAppend | opReply, id: id, body: binary.BigEndian.AppendUint64(nil, uint64(offset))}
 }
 
 func (c *Cell) put(data []byte) (int64, error) {
@@ -265,7 +288,17 @@ func (c *Cell) put(data []byte) (int64, error) {
 	for len(data) > 0 {
 		n := min(int64(len(data)), blockSize-c.size)
 
-		throw2(c.current.WriteAt(data[:n], c.size))
+		if _, err := c.current.WriteAt(data[:n], c.size); err != nil {
+			if !errors.Is(err, syscall.ENOSPC) {
+				throw(err)
+			}
+
+			slog.Warn("cell: store is full, waiting for the flusher", "block", c.num)
+
+			<-c.freed
+
+			continue
+		}
 
 		c.size += n
 		data = data[n:]
@@ -307,6 +340,11 @@ func (c *Cell) flush(buf []byte) {
 		throw2(c.hdd.WriteAt(buf, num*blockSize))
 		throw(c.hdd.Sync())
 		throw(os.Remove(c.readyPath(num)))
+
+		select {
+		case c.freed <- struct{}{}:
+		default:
+		}
 	}
 
 	syncDir(c.store)

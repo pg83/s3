@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"sort"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -15,17 +14,20 @@ import (
 var errLinkDown = errors.New("link down")
 
 const (
-	opAppend  = 1
-	opRead    = 2
-	opStatus  = 3
-	opReply   = 0x80
-	opFail    = 0xff
-	codeFull  = 1
-	codeRange = 2
-	codeIo    = 3
-	frameHead = 4 + 1 + 8
-	idlePace  = time.Second
-	keepAlive = 10 * time.Second
+	opAppend      = 1
+	opRead        = 2
+	opStatus      = 3
+	opCancel      = 4
+	opReply       = 0x80
+	opFail        = 0xff
+	codeFull      = 1
+	codeRange     = 2
+	codeIo        = 3
+	codeCancelled = 4
+	frameHead     = 4 + 1 + 8
+	idlePace      = time.Second
+	keepAlive     = 10 * time.Second
+	inboxDepth    = 16
 )
 
 type frame struct {
@@ -77,29 +79,18 @@ func splitId(body []byte) (uint64, []byte, bool) {
 }
 
 type reply struct {
-	op   byte
-	id   uint64
-	body []byte
+	op     byte
+	id     uint64
+	body   []byte
+	silent bool
 }
 
 func (c *Cell) serve(conn net.Conn) {
 	out := make(chan reply, 64)
+	expect := make(chan int, 1)
+	pushed := 0
 
-	var inflight sync.WaitGroup
-
-	go func() {
-		alive := true
-
-		for r := range out {
-			if alive && writeFrame(conn, r.op, r.id, r.body) != nil {
-				alive = false
-
-				conn.Close()
-			}
-		}
-
-		conn.Close()
-	}()
+	go c.drain(conn, out, expect)
 
 	for {
 		f, err := readFrame(conn)
@@ -116,18 +107,53 @@ func (c *Cell) serve(conn net.Conn) {
 			break
 		}
 
-		inflight.Add(1)
+		pushed++
 
-		go func() {
-			defer inflight.Done()
+		switch f.op {
+		case opAppend:
+			c.writes <- WriteReq{id: id, data: body, out: out}
+		case opCancel:
+			target, _, ok := splitId(body)
 
-			out <- c.answer(f.op, id, body)
-		}()
+			if !ok {
+				pushed--
+
+				break
+			}
+
+			c.writes <- WriteReq{id: target, cancel: true, out: out}
+		default:
+			go func() {
+				out <- c.answer(f.op, id, body)
+			}()
+		}
 	}
 
 	conn.Close()
-	inflight.Wait()
-	close(out)
+
+	expect <- pushed
+}
+
+func (c *Cell) drain(conn net.Conn, out chan reply, expect chan int) {
+	alive := true
+	total := -1
+	seen := 0
+
+	for total < 0 || seen < total {
+		select {
+		case r := <-out:
+			seen++
+
+			if alive && !r.silent && writeFrame(conn, r.op, r.id, r.body) != nil {
+				alive = false
+
+				conn.Close()
+			}
+		case total = <-expect:
+		}
+	}
+
+	conn.Close()
 }
 
 func (c *Cell) answer(op byte, id uint64, body []byte) reply {
@@ -144,16 +170,6 @@ func (c *Cell) answer(op byte, id uint64, body []byte) reply {
 
 func (c *Cell) handle(op byte, body []byte) (byte, []byte) {
 	switch op {
-	case opAppend:
-		offset, err := c.append(body)
-
-		if errors.Is(err, errFull) {
-			return opFail, []byte{codeFull}
-		}
-
-		throw(err)
-
-		return op | opReply, binary.BigEndian.AppendUint64(nil, uint64(offset))
 	case opRead:
 		if len(body) != 12 {
 			return opFail, []byte{codeIo}
@@ -203,7 +219,7 @@ type Link struct {
 }
 
 func newLink(addr string) *Link {
-	l := &Link{addr: addr, inbox: make(chan message, 1024), waiting: map[uint64]message{}}
+	l := &Link{addr: addr, inbox: make(chan message, inboxDepth), waiting: map[uint64]message{}}
 
 	go l.run()
 
@@ -258,7 +274,11 @@ func (l *Link) connect() net.Conn {
 
 		select {
 		case m := <-l.inbox:
-			l.accept(m)
+			if m.op == opCancel {
+				l.forget(m.reply)
+			} else {
+				l.accept(m)
+			}
 		case <-time.After(idlePace):
 		}
 	}
@@ -290,6 +310,18 @@ func (l *Link) talk(conn net.Conn) {
 	for {
 		select {
 		case m := <-l.inbox:
+			if m.op == opCancel {
+				for _, id := range l.forget(m.reply) {
+					l.last++
+
+					if writeFrame(conn, opCancel, l.last, binary.BigEndian.AppendUint64(nil, id)) != nil {
+						return
+					}
+				}
+
+				continue
+			}
+
 			l.accept(m)
 
 			if writeFrame(conn, m.op, l.last, m.body) != nil {
@@ -335,6 +367,26 @@ func readFrames(conn net.Conn, frames chan frame) {
 
 func (l *Link) send(tag int, op byte, body []byte, reply chan outcome) {
 	l.inbox <- message{tag: tag, op: op, body: body, reply: reply}
+}
+
+func (l *Link) cancel(reply chan outcome) {
+	l.inbox <- message{op: opCancel, reply: reply}
+}
+
+func (l *Link) forget(reply chan outcome) []uint64 {
+	var ids []uint64
+
+	for id, m := range l.waiting {
+		if m.reply == reply {
+			ids = append(ids, id)
+
+			delete(l.waiting, id)
+		}
+	}
+
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	return ids
 }
 
 func failCode(body []byte) byte {

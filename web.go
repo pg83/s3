@@ -323,7 +323,14 @@ func (wb *Web) object(w http.ResponseWriter, r *http.Request) {
 
 		throw(err)
 
-		data := throw2(wb.store.get(bucket, key, m))
+		data, err := wb.store.get(r.Context().Done(), bucket, key, m)
+
+		if errors.Is(err, errClientGone) {
+			return
+		}
+
+		throw(err)
+
 		kind := m.ContentType
 
 		if kind == "" {

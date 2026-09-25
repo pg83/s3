@@ -23,12 +23,14 @@ var bucketSubresources = []string{
 var objectSubresources = []string{"acl", "attributes", "legal-hold", "retention", "select", "tagging", "torrent"}
 
 const (
-	listLimit = 1000
-	s3Time    = "2006-01-02T15:04:05.000Z"
+	listLimit      = 1000
+	s3Time         = "2006-01-02T15:04:05.000Z"
+	bodiesInFlight = 32
 )
 
 type Front struct {
 	store *Store
+	slots chan struct{}
 }
 
 func runFront(cfg *Config, listen string) {
@@ -36,7 +38,7 @@ func runFront(cfg *Config, listen string) {
 		throwFmt("front: -listen is required")
 	}
 
-	f := &Front{store: newStore(cfg)}
+	f := &Front{store: newStore(cfg), slots: make(chan struct{}, bodiesInFlight)}
 
 	slog.Info("front: serving S3", "listen", listen)
 
@@ -393,8 +395,16 @@ func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key str
 			return
 		}
 
+		f.slots <- struct{}{}
+
+		defer func() { <-f.slots }()
+
 		data := readBody(r)
-		m, err := f.store.put(bucket, key, data, r.Header.Get("Content-Type"))
+		m, err := f.store.put(r.Context().Done(), bucket, key, data, r.Header.Get("Content-Type"))
+
+		if errors.Is(err, errClientGone) {
+			return
+		}
 
 		if errors.Is(err, errTooFewCells) {
 			s3Fail(w, http.StatusServiceUnavailable, "SlowDown", err.Error(), resource)
@@ -439,7 +449,15 @@ func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key str
 			return
 		}
 
-		data, err := f.store.get(bucket, key, m)
+		f.slots <- struct{}{}
+
+		defer func() { <-f.slots }()
+
+		data, err := f.store.get(r.Context().Done(), bucket, key, m)
+
+		if errors.Is(err, errClientGone) {
+			return
+		}
 
 		if errors.Is(err, errUnreadable) {
 			s3Fail(w, http.StatusInternalServerError, "InternalError", err.Error(), resource)
