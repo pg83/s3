@@ -19,11 +19,12 @@ func main() {
 		case "cell":
 			fs := flag.NewFlagSet("cell", flag.ExitOnError)
 			listen := fs.String("listen", "", "address to serve cell requests on")
-			ssd := fs.String("ssd", "", "directory on the SSD for the log tail")
+			load := fs.String("load", "", "directory on the SSD for blocks being read")
+			store := fs.String("store", "", "directory on the SSD for blocks being written")
 			hdd := fs.String("hdd", "", "raw block device for the log")
 
 			throw(fs.Parse(os.Args[2:]))
-			runCell(*listen, *ssd, *hdd)
+			runCell(*listen, *load, *store, *hdd)
 		case "front":
 			fs := flag.NewFlagSet("front", flag.ExitOnError)
 			config := fs.String("c", "", "config file")
@@ -59,7 +60,8 @@ func printUsage() {
 	os.Stderr.WriteString(`Usage: s3 command [flags]
 
 Commands:
-  cell -listen addr -ssd dir -hdd device      append-only log on one disk
+  cell -listen addr -load dir -store dir -hdd device
+                                              append-only log on one disk
   front -c config.json -listen addr           S3 API over the cells and etcd
   repair -c config.json -host name            rebuild the pieces this host owes
   web -c config.json -listen addr             browse buckets and objects

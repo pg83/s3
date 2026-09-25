@@ -41,7 +41,8 @@ type WriteResp struct {
 }
 
 type Cell struct {
-	ssd      string
+	load     string
+	store    string
 	hdd      *os.File
 	capacity int64
 	writes   chan WriteReq
@@ -52,12 +53,12 @@ type Cell struct {
 	size     int64
 }
 
-func runCell(listen, ssd, hdd string) {
-	if listen == "" || ssd == "" || hdd == "" {
-		throwFmt("cell: -listen, -ssd and -hdd are required")
+func runCell(listen, load, store, hdd string) {
+	if listen == "" || load == "" || store == "" || hdd == "" {
+		throwFmt("cell: -listen, -load, -store and -hdd are required")
 	}
 
-	c := openCell(ssd, hdd)
+	c := openCell(load, store, hdd)
 
 	if c.capacity-c.head() < minFree {
 		throwFmt("cell: %s is full (%d of %d bytes used), not serving", hdd, c.head(), c.capacity)
@@ -87,15 +88,16 @@ func runCell(listen, ssd, hdd string) {
 	}
 }
 
-func openCell(ssd, hdd string) *Cell {
-	for _, d := range []string{ssd, filepath.Join(ssd, "ready"), filepath.Join(ssd, "lru")} {
+func openCell(load, store, hdd string) *Cell {
+	for _, d := range []string{load, store, filepath.Join(store, "ready")} {
 		throw(os.MkdirAll(d, 0o755))
 	}
 
 	dev := throw2(os.OpenFile(hdd, os.O_RDWR, 0))
 
 	c := &Cell{
-		ssd:      ssd,
+		load:     load,
+		store:    store,
 		hdd:      dev,
 		capacity: throw2(dev.Seek(0, io.SeekEnd)),
 		writes:   make(chan WriteReq, 4096),
@@ -113,15 +115,15 @@ func openCell(ssd, hdd string) *Cell {
 }
 
 func (c *Cell) currentPath(num int64) string {
-	return filepath.Join(c.ssd, "current."+strconv.FormatInt(num, 10))
+	return filepath.Join(c.store, "current."+strconv.FormatInt(num, 10))
 }
 
 func (c *Cell) readyPath(num int64) string {
-	return filepath.Join(c.ssd, "ready", strconv.FormatInt(num, 10))
+	return filepath.Join(c.store, "ready", strconv.FormatInt(num, 10))
 }
 
-func (c *Cell) lruPath(num int64) string {
-	return filepath.Join(c.ssd, "lru", strconv.FormatInt(num, 10))
+func (c *Cell) loadPath(num int64) string {
+	return filepath.Join(c.load, strconv.FormatInt(num, 10))
 }
 
 func blockNumbers(dir, prefix string) []int64 {
@@ -145,11 +147,11 @@ func blockNumbers(dir, prefix string) []int64 {
 func (c *Cell) lastBlock() int64 {
 	var num int64
 
-	for _, n := range blockNumbers(filepath.Join(c.ssd, "ready"), "") {
+	for _, n := range blockNumbers(filepath.Join(c.store, "ready"), "") {
 		num = max(num, n+1)
 	}
 
-	for _, n := range blockNumbers(c.ssd, "current.") {
+	for _, n := range blockNumbers(c.store, "current.") {
 		num = max(num, n)
 	}
 
@@ -176,11 +178,11 @@ func (c *Cell) roll() {
 	throw(c.current.Sync())
 	throw(c.current.Close())
 	throw(os.Rename(c.currentPath(c.num), c.readyPath(c.num)))
-	syncDir(filepath.Join(c.ssd, "ready"))
+	syncDir(filepath.Join(c.store, "ready"))
 
 	c.num++
 	c.openCurrent()
-	syncDir(c.ssd)
+	syncDir(c.store)
 
 	select {
 	case c.ready <- struct{}{}:
@@ -191,7 +193,7 @@ func (c *Cell) roll() {
 func (c *Cell) head() int64 {
 	var head int64
 
-	for _, n := range blockNumbers(c.ssd, "current.") {
+	for _, n := range blockNumbers(c.store, "current.") {
 		head = n*blockSize + throw2(os.Stat(c.currentPath(n))).Size()
 	}
 
@@ -273,7 +275,7 @@ func (c *Cell) flusher() {
 func (c *Cell) flush() {
 	buf := make([]byte, blockSize)
 
-	for _, num := range blockNumbers(filepath.Join(c.ssd, "ready"), "") {
+	for _, num := range blockNumbers(filepath.Join(c.store, "ready"), "") {
 		f := throw2(os.Open(c.readyPath(num)))
 
 		throw2(io.ReadFull(f, buf))
@@ -283,7 +285,7 @@ func (c *Cell) flush() {
 		throw(os.Remove(c.readyPath(num)))
 	}
 
-	syncDir(filepath.Join(c.ssd, "ready"))
+	syncDir(filepath.Join(c.store, "ready"))
 }
 
 func (c *Cell) read(off int64, n int64) ([]byte, error) {
@@ -314,19 +316,17 @@ func (c *Cell) read(off int64, n int64) ([]byte, error) {
 }
 
 func (c *Cell) open(num int64) *os.File {
-	if f, err := os.Open(c.lruPath(num)); err == nil {
-		os.Chtimes(c.lruPath(num), time.Now(), time.Now())
+	if f, err := os.Open(c.loadPath(num)); err == nil {
+		os.Chtimes(c.loadPath(num), time.Now(), time.Now())
 
 		return f
 	}
 
-	if err := os.Link(c.readyPath(num), c.lruPath(num)); err == nil || errors.Is(err, os.ErrExist) {
-		if f, err := os.Open(c.lruPath(num)); err == nil {
-			return f
-		}
+	if f, err := os.Open(c.currentPath(num)); err == nil {
+		return f
 	}
 
-	if f, err := os.Open(c.currentPath(num)); err == nil {
+	if f, err := os.Open(c.readyPath(num)); err == nil {
 		return f
 	}
 
@@ -334,7 +334,7 @@ func (c *Cell) open(num int64) *os.File {
 
 	defer c.fill.Unlock()
 
-	if f, err := os.Open(c.lruPath(num)); err == nil {
+	if f, err := os.Open(c.loadPath(num)); err == nil {
 		return f
 	}
 
@@ -342,12 +342,12 @@ func (c *Cell) open(num int64) *os.File {
 
 	throw2(c.hdd.ReadAt(buf, num*blockSize))
 
-	tmp := c.lruPath(num) + ".tmp"
+	tmp := c.loadPath(num) + ".tmp"
 
 	throw(os.WriteFile(tmp, buf, 0o644))
-	throw(os.Rename(tmp, c.lruPath(num)))
+	throw(os.Rename(tmp, c.loadPath(num)))
 
-	return throw2(os.Open(c.lruPath(num)))
+	return throw2(os.Open(c.loadPath(num)))
 }
 
 func (c *Cell) sweeper() {
@@ -361,8 +361,7 @@ func (c *Cell) sweeper() {
 }
 
 func (c *Cell) sweep() {
-	dir := filepath.Join(c.ssd, "lru")
-	entries := throw2(os.ReadDir(dir))
+	entries := throw2(os.ReadDir(c.load))
 
 	var total int64
 
@@ -371,7 +370,7 @@ func (c *Cell) sweep() {
 	for _, entry := range entries {
 		info, err := entry.Info()
 
-		if err != nil {
+		if err != nil || strings.HasSuffix(entry.Name(), ".tmp") {
 			continue
 		}
 
@@ -386,7 +385,7 @@ func (c *Cell) sweep() {
 			break
 		}
 
-		if os.Remove(filepath.Join(dir, info.Name())) == nil {
+		if os.Remove(filepath.Join(c.load, info.Name())) == nil {
 			total -= info.Size()
 		}
 	}

@@ -58,7 +58,8 @@ class Cell:
 
     def __init__(self, hdd_bytes, root=None):
         self.root = root or tempfile.mkdtemp(prefix="s3cell-")
-        self.ssd = os.path.join(self.root, "ssd")
+        self.load = os.path.join(self.root, "load")
+        self.store = os.path.join(self.root, "store")
         self.hdd = os.path.join(self.root, "hdd")
         self.port = free_port()
         self.proc = None
@@ -69,7 +70,7 @@ class Cell:
 
     def start(self, wait=True):
         self.proc = subprocess.Popen(
-            [BINARY, "cell", "-listen", f"127.0.0.1:{self.port}", "-ssd", self.ssd, "-hdd", self.hdd],
+            [BINARY, "cell", "-listen", f"127.0.0.1:{self.port}", "-load", self.load, "-store", self.store, "-hdd", self.hdd],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
 
@@ -312,7 +313,7 @@ class Cluster:
 
         cell = self.cell(cell_id)
         block = offset // (2 << 20)
-        current = os.path.join(cell.ssd, f"current.{block}")
+        current = os.path.join(cell.store, f"current.{block}")
 
         # the piece may still sit in the current block; push it out to the HDD
         if os.path.exists(current):
@@ -325,10 +326,10 @@ class Cluster:
 
         deadline = time.time() + 10
 
-        while time.time() < deadline and os.listdir(os.path.join(cell.ssd, "ready")):
+        while time.time() < deadline and os.listdir(os.path.join(cell.store, "ready")):
             time.sleep(0.1)
 
-        if os.listdir(os.path.join(cell.ssd, "ready")):
+        if os.listdir(os.path.join(cell.store, "ready")):
             fail("the flusher never emptied ready/")
 
         with open(cell.hdd, "r+b") as f:
@@ -342,10 +343,8 @@ class Cluster:
     def clear_lru(self):
         for h in self.hosts:
             for c in h.cells:
-                lru = os.path.join(c.ssd, "lru")
-
-                for name in os.listdir(lru):
-                    os.remove(os.path.join(lru, name))
+                for name in os.listdir(c.load):
+                    os.remove(os.path.join(c.load, name))
 
     def s3(self):
         return S3(self.front_port)

@@ -38,10 +38,10 @@ if c.read(o2 + len(big) - 1, 2) is not None:
     lib.fail("read across the head must be refused")
 
 # block 0 is full and goes to the HDD; block 1 is current
-ready = os.path.join(cell.ssd, "ready")
+ready = os.path.join(cell.store, "ready")
 deadline = time.time() + 10
 
-while time.time() < deadline and (os.listdir(ready) or not os.path.exists(os.path.join(cell.ssd, "current.1"))):
+while time.time() < deadline and (os.listdir(ready) or not os.path.exists(os.path.join(cell.store, "current.1"))):
     time.sleep(0.1)
 
 if os.listdir(ready):
@@ -53,14 +53,14 @@ with open(cell.hdd, "rb") as f:
     if f.read(BLOCK) != log[:BLOCK]:
         lib.fail("HDD does not hold block 0")
 
-for name in os.listdir(os.path.join(cell.ssd, "lru")):
-    os.remove(os.path.join(cell.ssd, "lru", name))
+for name in os.listdir(cell.load):
+    os.remove(os.path.join(cell.load, name))
 
 if c.read(o1, len(small)) != small or c.read(o2, len(big)) != big:
     lib.fail("read back from the HDD differs")
 
-if os.listdir(os.path.join(cell.ssd, "lru")) != ["0"]:
-    lib.fail(f"lru after an HDD read: {os.listdir(os.path.join(cell.ssd, 'lru'))}")
+if os.listdir(cell.load) != ["0"]:
+    lib.fail(f"load after an HDD read: {os.listdir(cell.load)}")
 
 o3 = c.append(b"after the block")
 

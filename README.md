@@ -16,16 +16,18 @@ status()            -> head, free
 ```
 
 Inside, a cell is an append-only log cut into 2 MiB blocks, and the
-offset is the position in that log. New data goes into `current.<n>` on
-the SSD: a writer wakes every 100 ms, writes everything that arrived
+offset is the position in that log. The SSD is two places so that
+reads and writes do not fight over one: `-store` takes the writes,
+`-load` serves the reads. New data goes into `current.<n>` in the
+store: a writer wakes every 100 ms, writes everything that arrived
 since the last tick, fsyncs once and only then answers with the offsets.
-A block that is full is renamed into `ready/`; a second goroutine copies
-ready blocks to the raw HDD at `n * 2 MiB`, fsyncs and removes them.
-Readers ask nobody: a block is opened from `lru/`, else hard-linked there
-from `ready/`, else read from `current.<n>`, else copied from the HDD
-into `lru/` under the one lock the cell has. `lru/` is swept by age
-past its budget. No index, no checksum; the bytes are the front's to
-interpret.
+A block that is full is renamed into `ready/` in the store; a second
+goroutine copies ready blocks to the raw HDD at `n * 2 MiB`, fsyncs and
+removes them. Readers ask nobody: a block is opened from the load, else
+from `current.<n>`, else from `ready/`, in that order because a block
+only ever moves forward through them, else copied from the HDD into the
+load under the one lock the cell has. The load is swept by age past its
+budget. No index, no checksum; the bytes are the front's to interpret.
 
 A cell that runs out of space starts, does not open its port and exits.
 Refilling an empty cell from the other two hosts is the compaction.
@@ -156,7 +158,7 @@ protocol.
 ## Handlers
 
 ```
-s3 cell -listen addr -ssd dir -hdd device
+s3 cell -listen addr -load dir -store dir -hdd device
 s3 front -c config.json -listen addr
 s3 repair -c config.json -host name
 s3 web -c config.json -listen addr
