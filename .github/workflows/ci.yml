@@ -221,7 +221,11 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
+      # The floor above is the gate. Codecov has to have the repository
+      # activated before it takes an upload; until then this step warns and
+      # the job stays green.
       - name: Upload coverage to Codecov
+        continue-on-error: true
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           use_oidc: true
