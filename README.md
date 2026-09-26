@@ -262,10 +262,9 @@ Config is JSON:
 
 No compaction: a full cell is emptied and refilled. No scrub. No
 rebuild walk over etcd for a lost cell. No limits on object size or
-concurrent uploads. No range reads served without assembling the whole
-object once it is read. No multipart uploads, no server-side copy, no signatures
-checked, no CORS, no bucket policies, ACLs or versioning, no buckets
-made over the API.
+concurrent uploads. No multipart uploads, no server-side copy, no
+signatures checked, no CORS, no bucket policies, ACLs or versioning,
+no buckets made over the API.
 
 ## Build and test
 
