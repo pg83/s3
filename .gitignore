@@ -5,4 +5,10 @@
 __pycache__/
 *.pyc
 .claude/
+/node_ownership_gen.go
+/coverage
+/coverage-chaos
 /e2e_*
+/chaos_*
+/chaos-binary
+/chaos-points

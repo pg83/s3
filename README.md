@@ -1,5 +1,7 @@
 # s3
 
+[![codecov](https://codecov.io/gh/pg83/s3/branch/master/graph/badge.svg)](https://app.codecov.io/gh/pg83/s3/tree/master)
+
 An S3 store for a small cluster of cheap disks: three hosts, a few
 spinning drives each, an SSD in front of every drive. Objects are cut
 into erasure-coded pieces that live in append-only logs; the namespace
@@ -205,7 +207,9 @@ arriving on the channel prompts a connect right away, so the answer
 is as fresh as the last attempt, never a timer. Nothing is shared,
 nothing is locked, nothing is retried below the operation.
 
-On the cell the connection's reader puts every append straight into
+On the cell an accept the kernel refuses is logged and tried again a
+moment later; the connection waits in the backlog meanwhile. The
+connection's reader puts every append straight into
 the writer's queue and blocks when the queue is full, so it stops
 reading the socket, the window closes and the front waits; reads and
 status get a goroutine each. The writer answers into the connection's
@@ -269,12 +273,45 @@ no buckets made over the API.
 ## Build and test
 
 `./build` builds `.build/bin/s3` and publishes `./s3`. `./build test`
-runs the end-to-end suite in `tst/`; the S3 scenario needs an etcd
-binary, `S3_TEST_ETCD=/path/to/etcd` or `etcd` on PATH. `dev/stand.py`
-drives a live stand through a few hundred objects of mixed sizes: put,
-list, the flush to the HDD, reads from the HDD and then from the load,
-ranges, an overwrite, deletes one by one and in bulk, with timings;
-`--hosts` adds a look inside every cell over ssh, `--bucket` names a
-bucket of the config. Run it on a host
-against the local front to measure the stand rather than the way in. See `STYLE.md` for the code style
-and `CLAUDE.md` for the working conventions.
+runs the end-to-end suite in `tst/`, every scenario a Python script
+driving the real binary as local processes; the scenarios over the
+front need an etcd binary, `S3_TEST_ETCD=/path/to/etcd` or `etcd` on
+PATH, and skip without one. `./build -Drace test` is the same suite
+with the race detector. The lab in `tst/lib.py` writes every process
+log to a file and copies them to `S3_TEST_ARTIFACTS` when a scenario
+fails, and stops what it started with SIGTERM when the scenario ends.
+
+`./build -Dcoverage coverage` runs the suite against an instrumented
+binary: every process writes its counters to a directory of its own
+under `GOCOVERDIR`, `dev/coverage.py` refuses a run that lost any of
+them, adds them up into `.build/coverage.out` and holds the floor. A
+process leaves through `os.Exit` on SIGTERM so that the counters reach
+the disk; one killed with SIGKILL loses them.
+
+`./build chaos` runs every scenario again against `s3-chaos`, the
+same binary built behind the `s3chaos` tag, whose `Syscalls` refuses
+some calls the way the kernel is entitled to: an accept, a dial, a
+read or a write on a link or on a cell's connection. `S3_CHAOS` names
+the points and how often each fails, one call in so many, `all` arms
+every point, `-name` disarms one, and `S3_CHAOS_SEED` makes the choice
+repeatable. The suite arms only the points every scenario survives
+unchanged, an accept refused and a link that breaks and is redialled;
+`tst/test_chaos.py` arms the rest, the dial and the cell's side of the
+connection, and checks that every object still goes in and comes back
+whole. Every call into the operating system that can fail belongs in
+`syscalls.go`; `dev/chaos_points.py` refuses a point that is declared
+but never asked about.
+
+CI runs the plain suite, the race detector, the instrumented suite and
+the instrumented chaos suite; the two profiles are added up with
+`dev/merge_coverage.py`, held to a floor there, and uploaded to
+Codecov as one report.
+
+`dev/stand.py` drives a live stand through a few hundred objects of
+mixed sizes: put, list, the flush to the HDD, reads from the HDD and
+then from the load, ranges, an overwrite, deletes one by one and in
+bulk, with timings; `--hosts` adds a look inside every cell over ssh,
+`--bucket` names a bucket of the config. Run it on a host against the
+local front to measure the stand rather than the way in. See
+`STYLE.md` for the code style and `CLAUDE.md` for the working
+conventions.

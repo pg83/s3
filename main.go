@@ -4,6 +4,8 @@ import (
 	"flag"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
 )
 
 var logLevel = new(slog.LevelVar)
@@ -31,6 +33,9 @@ func main() {
 	}
 
 	try(func() {
+		armChaos()
+		exitOnSignal()
+
 		switch os.Args[1] {
 		case "cell":
 			fs, debug := flags("cell")
@@ -83,6 +88,17 @@ func main() {
 		slog.Error(exc.error())
 		os.Exit(1)
 	})
+}
+
+func exitOnSignal() {
+	stop := make(chan os.Signal, 1)
+
+	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
+
+	go func() {
+		<-stop
+		os.Exit(0)
+	}()
 }
 
 func printUsage() {

@@ -228,10 +228,12 @@ func newLink(addr string, up chan struct{}) *Link {
 }
 
 func (l *Link) run() {
-	for {
-		conn := l.connect()
+	conn := l.connect(false)
 
-		l.talk(conn)
+	for {
+		l.talk(sys.connection(conn, "link read", "link write"))
+
+		conn = l.connect(true)
 	}
 }
 
@@ -240,11 +242,11 @@ func (l *Link) accept(m message) {
 	l.waiting[l.last] = m
 }
 
-func (l *Link) connect() net.Conn {
+func (l *Link) connect(again bool) net.Conn {
 	down := false
 
 	for {
-		conn, err := net.DialTimeout("tcp", l.addr, dialTimeout)
+		conn, err := sys.dial("tcp", l.addr, dialTimeout)
 
 		if err == nil {
 			if tcp, ok := conn.(*net.TCPConn); ok {
@@ -252,7 +254,7 @@ func (l *Link) connect() net.Conn {
 				tcp.SetKeepAlivePeriod(keepAlive)
 			}
 
-			if down {
+			if down || again {
 				slog.Info("link: connected", "cell", l.addr)
 
 				select {

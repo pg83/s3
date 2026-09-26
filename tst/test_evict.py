@@ -99,7 +99,7 @@ for off in (0, 3 * MB - 7, 5 * MB + 1):
 
 cell.stop()
 
-if "waiting for the flusher" not in cell.proc.stderr.read():
+if "waiting for the flusher" not in cell.log():
     lib.fail("the tight store never made the writer wait")
 
 print("ok")

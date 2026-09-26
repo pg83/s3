@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"os/signal"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -31,6 +30,7 @@ const (
 	maxFrameSize = 1 << 31
 	ioAlign      = 4096
 	writesQueue  = 1024
+	acceptPause  = 50 * time.Millisecond
 )
 
 type WriteReq struct {
@@ -84,7 +84,7 @@ func runCell(listen []string, load, store, hdd string) {
 	lns := make([]net.Listener, 0, len(listen))
 
 	for _, addr := range listen {
-		lns = append(lns, throw2(net.Listen("tcp", addr)))
+		lns = append(lns, sys.accepts(throw2(net.Listen("tcp", addr))))
 	}
 
 	slog.Info("cell: serving", "listen", listen, "block", c.num, "head", c.head(), "capacity", c.capacity)
@@ -92,15 +92,6 @@ func runCell(listen []string, load, store, hdd string) {
 	go c.writer()
 	go c.flusher()
 	go c.loader()
-
-	stop := make(chan os.Signal, 1)
-
-	signal.Notify(stop, syscall.SIGTERM, syscall.SIGINT)
-
-	go func() {
-		<-stop
-		os.Exit(0)
-	}()
 
 	for _, ln := range lns[1:] {
 		go c.accept(ln)
@@ -111,9 +102,16 @@ func runCell(listen []string, load, store, hdd string) {
 
 func (c *Cell) accept(ln net.Listener) {
 	for {
-		conn := throw2(ln.Accept())
+		conn, err := ln.Accept()
 
-		go c.serve(conn)
+		if err != nil {
+			slog.Warn("cell: accept", "err", err)
+			time.Sleep(acceptPause)
+
+			continue
+		}
+
+		go c.serve(sys.connection(conn, "cell read", "cell write"))
 	}
 }
 

@@ -7,7 +7,6 @@ waiting for the client to give up."""
 import json
 import os
 import socket
-import subprocess
 import time
 
 import lib
@@ -77,13 +76,8 @@ config = cluster.config + ".hole"
 with open(config, "w") as f:
     json.dump(spec, f)
 
-port = lib.free_port()
-front = subprocess.Popen(
-    [lib.BINARY, "front", "-c", config, "-listen", f"127.0.0.1:{port}"],
-    stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-)
-lib.wait_port(port)
-holed = lib.S3(port)
+front = lib.Front(config).start()
+holed = front.s3()
 
 # a put answers on the two hosts that are there and leaves the debt for the third
 data = os.urandom(12345)
@@ -122,10 +116,9 @@ if status != 200 or body != blobs[victim]:
 if took > 30:
     lib.fail(f"get {victim} through the hole took {took:.1f}s")
 
-front.terminate()
-front.wait(timeout=10)
+front.stop()
 
-if "link: down" not in front.stderr.read():
+if "link: down" not in front.log():
     lib.fail("the front never declared the link down")
 
 print("ok")

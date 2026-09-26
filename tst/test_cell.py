@@ -166,7 +166,7 @@ full = lib.Cell(hdd_bytes=0, root=cell.root)
 full.start(wait=False)
 rc = full.wait_exit()
 
-if rc == 0 or "full" not in full.proc.stderr.read():
+if rc == 0 or "full" not in full.log():
     lib.fail(f"a full cell must exit without serving, rc={rc}")
 
 print("ok")

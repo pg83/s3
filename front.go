@@ -43,7 +43,7 @@ func runFront(cfg *Config, listen []string) {
 	lns := make([]net.Listener, 0, len(listen))
 
 	for _, addr := range listen {
-		lns = append(lns, throw2(net.Listen("tcp", addr)))
+		lns = append(lns, sys.accepts(throw2(net.Listen("tcp", addr))))
 	}
 
 	slog.Info("front: serving S3", "listen", listen)

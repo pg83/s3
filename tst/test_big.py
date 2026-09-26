@@ -97,7 +97,7 @@ if status != 200 or body != data:
 wait("the corrupt piece to be mended", lambda: not etcd.has(f"repair/{owner}/big/three") and etcd.manifest("big", "three") != m)
 m2 = etcd.manifest("big", "three")
 p2 = next(q for q in m2["chunks"][1]["pieces"] if q["piece"] == 1)
-if p2["offset"] == p["offset"] or p2["xxh"] != p["xxh"] or cluster.host_of(p2["cell"]) != cluster.host_of(p["cell"]):
+if (p2["cell"], p2["offset"]) == (p["cell"], p["offset"]) or p2["xxh"] != p["xxh"] or cluster.host_of(p2["cell"]) != cluster.host_of(p["cell"]):
     lib.fail(f"the corrupt piece was not rewritten in place of the old one: {p} -> {p2}")
 if [q for q in lib.pieces(m2) if q != p2] != [q for q in lib.pieces(m) if q != p]:
     lib.fail(f"repair touched sound pieces: {m} -> {m2}")
@@ -194,7 +194,7 @@ for p in mu["chunks"][0]["pieces"]:
     if len(p.get("xxh", "")) != 16:
         lib.fail(f"upgraded piece without xxh: {p}")
 up = next(p for p in mu["chunks"][0]["pieces"] if p["piece"] == 1)
-if up["offset"] == lp["offset"] or cluster.host_of(up["cell"]) != cluster.host_of(lp["cell"]):
+if (up["cell"], up["offset"]) == (lp["cell"], lp["offset"]) or cluster.host_of(up["cell"]) != cluster.host_of(lp["cell"]):
     lib.fail(f"the legacy corrupt piece was not rewritten on its host: {lp} -> {up}")
 if [(p["cell"], p["offset"]) for p in mu["chunks"][0]["pieces"] if p["piece"] != 1] != [(p["cell"], p["offset"]) for p in legacy["pieces"] if p["piece"] != 1]:
     lib.fail(f"the upgrade moved sound pieces: {legacy} -> {mu}")

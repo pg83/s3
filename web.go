@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html/template"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -227,10 +228,11 @@ func runWeb(cfg *Config, listen string) {
 	}
 
 	w := &Web{store: newStore(cfg)}
+	ln := sys.accepts(throw2(net.Listen("tcp", listen)))
 
 	slog.Info("web: serving", "listen", listen)
 
-	throw(http.ListenAndServe(listen, w))
+	throw(http.Serve(ln, w))
 }
 
 func (wb *Web) ServeHTTP(w http.ResponseWriter, r *http.Request) {
