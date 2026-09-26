@@ -51,10 +51,16 @@ func main() {
 		case "front":
 			fs, debug := flags("front")
 			config := fs.String("c", "", "config file")
-			listen := fs.String("listen", "", "address to serve S3 on")
+			listen := []string{}
+
+			fs.Func("listen", "address to serve S3 on, may repeat", func(addr string) error {
+				listen = append(listen, addr)
+
+				return nil
+			})
 
 			parse(fs, debug)
-			runFront(loadConfig(*config), *listen)
+			runFront(loadConfig(*config), listen)
 		case "repair":
 			fs, debug := flags("repair")
 			config := fs.String("c", "", "config file")
@@ -85,7 +91,7 @@ func printUsage() {
 Commands:
   cell -listen addr [-listen addr] -load dir -store dir -hdd device
                                               append-only log on one disk
-  front -c config.json -listen addr           S3 API over the cells and etcd
+  front -c config.json -listen addr [-listen addr]   S3 API over the cells and etcd
   repair -c config.json -host name            rebuild the pieces this host owes
   web -c config.json -listen addr             browse buckets and objects
 `)

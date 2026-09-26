@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -33,16 +34,25 @@ type Front struct {
 	slots chan struct{}
 }
 
-func runFront(cfg *Config, listen string) {
-	if listen == "" {
+func runFront(cfg *Config, listen []string) {
+	if len(listen) == 0 {
 		throwFmt("front: -listen is required")
 	}
 
 	f := &Front{store: newStore(cfg), slots: make(chan struct{}, bodiesInFlight)}
+	lns := make([]net.Listener, 0, len(listen))
+
+	for _, addr := range listen {
+		lns = append(lns, throw2(net.Listen("tcp", addr)))
+	}
 
 	slog.Info("front: serving S3", "listen", listen)
 
-	throw(http.ListenAndServe(listen, f))
+	for _, ln := range lns[1:] {
+		go func() { throw(http.Serve(ln, f)) }()
+	}
+
+	throw(http.Serve(lns[0], f))
 }
 
 type S3Error struct {

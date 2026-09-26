@@ -272,10 +272,11 @@ class Cluster:
     """Three hosts of cells, one front and, on request, a repair per host;
     the buckets are the config's."""
 
-    def __init__(self, etcd, hosts, cells, hdd_bytes, buckets):
+    def __init__(self, etcd, hosts, cells, hdd_bytes, buckets, front_listeners=1):
         self.etcd = etcd
         self.hosts = [Host(i, cells, hdd_bytes) for i in range(hosts)]
-        self.front_port = free_port()
+        self.front_ports = [free_port() for _ in range(front_listeners)]
+        self.front_port = self.front_ports[0]
         self.config = os.path.join(tempfile.mkdtemp(prefix="s3cfg-"), "config.json")
         self.procs = []
 
@@ -292,11 +293,14 @@ class Cluster:
         for h in self.hosts:
             h.start()
 
+        listen = [arg for port in self.front_ports for arg in ("-listen", f"127.0.0.1:{port}")]
         self.procs.append(subprocess.Popen(
-            [BINARY, "front", "-c", self.config, "-listen", f"127.0.0.1:{self.front_port}"],
+            [BINARY, "front", "-c", self.config, *listen],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
         ))
-        wait_port(self.front_port)
+
+        for port in self.front_ports:
+            wait_port(port)
 
         return self
 
@@ -367,8 +371,8 @@ class Cluster:
                 for name in os.listdir(c.load):
                     os.remove(os.path.join(c.load, name))
 
-    def s3(self):
-        return S3(self.front_port)
+    def s3(self, listener=0):
+        return S3(self.front_ports[listener])
 
 
 class S3:

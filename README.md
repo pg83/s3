@@ -206,14 +206,16 @@ protocol.
 
 ```
 s3 cell -listen addr [-listen addr] -load dir -store dir -hdd device
-s3 front -c config.json -listen addr
+s3 front -c config.json -listen addr [-listen addr]
 s3 repair -c config.json -host name
 s3 web -c config.json -listen addr
 ```
 
 A cell serves the same log on every address it is given: in the lab
 that is loopback, where the repair of its own host reaches it, and the
-cluster address for every other process.
+cluster address for every other process. The front likewise serves on
+every address it is given; the lab adds the cluster address for the
+processes that live in another network namespace.
 
 `s3 web` is the browser: `/` lists the buckets, `/b/<bucket>?prefix=`
 walks a bucket folder by folder (the delimiter is `/`, 500 entries a

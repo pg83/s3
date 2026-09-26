@@ -1,6 +1,7 @@
 """The metadata paths: the buckets are the config's, so a bucket that
 is not there is reported by every operation without asking etcd, and
-none is created or deleted over the API; a listing of hundreds of keys
+none is created or deleted over the API; the front is the same front
+on every address it listens on; a listing of hundreds of keys
 comes back complete, with exact truncation at the last key, paged by
 keys and by folders; three hundred keys go in one delete request; a
 repair whose own cells were down when the key was queued finishes as
@@ -25,8 +26,9 @@ if etcd is None:
     raise SystemExit(0)
 
 etcd.start()
-cluster = lib.Cluster(etcd, hosts=3, cells=3, hdd_bytes=64 * MB, buckets=["photos", "many", "life"]).start()
+cluster = lib.Cluster(etcd, hosts=3, cells=3, hdd_bytes=64 * MB, buckets=["photos", "many", "life"], front_listeners=2).start()
 s3 = cluster.s3()
+other = cluster.s3(1)
 
 
 def keys_under(prefix):
@@ -111,6 +113,14 @@ if status != 404 or b"NoSuchKey" not in out or b"NoSuchBucket" in out:
 status, _, _ = s3.request("PUT", "/life/k", b"data")
 if status != 200:
     lib.fail(f"put: {status}")
+
+status, _, body = other.request("GET", "/life/k")
+if status != 200 or body != b"data":
+    lib.fail(f"get over the second address: {status} {body!r}")
+
+status, _, body = other.request("GET", "/")
+if status != 200 or [b.find(NS + "Name").text for b in ET.fromstring(body).iter(NS + "Bucket")] != ["life", "many", "photos"]:
+    lib.fail(f"buckets over the second address: {status}")
 
 for full in (True, False):
     status, _, out = s3.request("DELETE", "/life")
