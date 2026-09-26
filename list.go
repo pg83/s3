@@ -95,9 +95,15 @@ func (s *Store) list(bucket, prefix, delimiter, after string, maxKeys int) (List
 	values := s.etcd.fetch(keys)
 
 	for _, key := range keys {
+		value, still := values[key]
+
+		if !still {
+			continue
+		}
+
 		m := Manifest{}
 
-		throw(json.Unmarshal(values[key], &m))
+		throw(json.Unmarshal(value, &m))
 		out.Objects = append(out.Objects, Listed{Key: strings.TrimPrefix(key, root), Manifest: m})
 	}
 
