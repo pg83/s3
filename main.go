@@ -34,13 +34,20 @@ func main() {
 		switch os.Args[1] {
 		case "cell":
 			fs, debug := flags("cell")
-			listen := fs.String("listen", "", "address to serve cell requests on")
+			listen := []string{}
+
+			fs.Func("listen", "address to serve cell requests on, may repeat", func(addr string) error {
+				listen = append(listen, addr)
+
+				return nil
+			})
+
 			load := fs.String("load", "", "directory on the SSD for blocks being read")
 			store := fs.String("store", "", "directory on the SSD for blocks being written")
 			hdd := fs.String("hdd", "", "raw block device for the log")
 
 			parse(fs, debug)
-			runCell(*listen, *load, *store, *hdd)
+			runCell(listen, *load, *store, *hdd)
 		case "front":
 			fs, debug := flags("front")
 			config := fs.String("c", "", "config file")
@@ -76,7 +83,7 @@ func printUsage() {
 	os.Stderr.WriteString(`Usage: s3 command [flags]
 
 Commands:
-  cell -listen addr -load dir -store dir -hdd device
+  cell -listen addr [-listen addr] -load dir -store dir -hdd device
                                               append-only log on one disk
   front -c config.json -listen addr           S3 API over the cells and etcd
   repair -c config.json -host name            rebuild the pieces this host owes

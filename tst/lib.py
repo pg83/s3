@@ -62,12 +62,13 @@ def ready_blocks(store):
 class Cell:
     """One `s3 cell` process over a temp SSD dir and a sparse file as the HDD."""
 
-    def __init__(self, hdd_bytes, root=None):
+    def __init__(self, hdd_bytes, root=None, listeners=1):
         self.root = root or tempfile.mkdtemp(prefix="s3cell-")
         self.load = os.path.join(self.root, "load")
         self.store = os.path.join(self.root, "store")
         self.hdd = os.path.join(self.root, "hdd")
-        self.port = free_port()
+        self.ports = [free_port() for _ in range(listeners)]
+        self.port = self.ports[0]
         self.proc = None
 
         if not os.path.exists(self.hdd):
@@ -75,13 +76,15 @@ class Cell:
                 f.truncate(hdd_bytes)
 
     def start(self, wait=True):
+        listen = [arg for port in self.ports for arg in ("-listen", f"127.0.0.1:{port}")]
         self.proc = subprocess.Popen(
-            [BINARY, "cell", "-listen", f"127.0.0.1:{self.port}", "-load", self.load, "-store", self.store, "-hdd", self.hdd],
+            [BINARY, "cell", *listen, "-load", self.load, "-store", self.store, "-hdd", self.hdd],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
         )
 
         if wait:
-            wait_port(self.port)
+            for port in self.ports:
+                wait_port(port)
 
         return self
 
@@ -95,8 +98,8 @@ class Cell:
     def wait_exit(self, timeout=10):
         return self.proc.wait(timeout=timeout)
 
-    def client(self):
-        return Client(self.port)
+    def client(self, listener=0):
+        return Client(self.ports[listener])
 
 
 class Client:

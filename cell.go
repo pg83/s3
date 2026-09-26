@@ -70,8 +70,8 @@ type Cell struct {
 	size     int64
 }
 
-func runCell(listen, load, store, hdd string) {
-	if listen == "" || load == "" || store == "" || hdd == "" {
+func runCell(listen []string, load, store, hdd string) {
+	if len(listen) == 0 || load == "" || store == "" || hdd == "" {
 		throwFmt("cell: -listen, -load, -store and -hdd are required")
 	}
 
@@ -81,7 +81,11 @@ func runCell(listen, load, store, hdd string) {
 		throwFmt("cell: %s is full (%d of %d bytes used), not serving", hdd, c.head(), c.capacity)
 	}
 
-	ln := throw2(net.Listen("tcp", listen))
+	lns := make([]net.Listener, 0, len(listen))
+
+	for _, addr := range listen {
+		lns = append(lns, throw2(net.Listen("tcp", addr)))
+	}
 
 	slog.Info("cell: serving", "listen", listen, "block", c.num, "head", c.head(), "capacity", c.capacity)
 
@@ -98,6 +102,14 @@ func runCell(listen, load, store, hdd string) {
 		os.Exit(0)
 	}()
 
+	for _, ln := range lns[1:] {
+		go c.accept(ln)
+	}
+
+	c.accept(lns[0])
+}
+
+func (c *Cell) accept(ln net.Listener) {
 	for {
 		conn := throw2(ln.Accept())
 

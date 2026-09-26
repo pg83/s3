@@ -1,7 +1,8 @@
 """A cell hands out offsets only for bytes fsynced on the SSD, moves full
 2 MiB blocks to the HDD, serves bytes from the LRU, the ready blocks, the
-current block and the HDD alike, survives a restart, and refuses to serve
-once the disk is full."""
+current block and the HDD alike, survives a restart, refuses to serve
+once the disk is full, and is the same cell on every address it
+listens on."""
 
 import os
 import struct
@@ -12,8 +13,9 @@ import lib
 MB = 1 << 20
 BLOCK = 2 * MB
 
-cell = lib.Cell(hdd_bytes=32 * MB).start()
+cell = lib.Cell(hdd_bytes=32 * MB, listeners=2).start()
 c = cell.client()
+other = cell.client(1)
 
 head, free = c.status()
 
@@ -34,6 +36,11 @@ if o1 != 0 or o2 != len(small):
 
 if c.read(o1, len(small)) != small or c.read(o2, len(big)) != big:
     lib.fail("read back differs")
+
+if other.read(o1, len(small)) != small or other.status() != c.status():
+    lib.fail("the second address is not the same cell")
+
+other.close()
 
 if c.read(o2 + len(big) - 1, 2) is not None:
     lib.fail("read across the head must be refused")
@@ -75,8 +82,8 @@ if c.read(BLOCK - 4, 8) != log[BLOCK - 4:BLOCK + 4]:
 if c.read(o3 - 4, 4 + len(b"after the block")) != log[o3 - 4:]:
     lib.fail("read spanning the HDD and the current block differs")
 
-# many small appends from several connections share one tick and stay in order
-clients = [cell.client() for _ in range(4)]
+# many small appends from several connections, over both addresses, share one tick and stay in order
+clients = [cell.client(i % 2) for i in range(4)]
 offsets = []
 
 for i in range(200):
