@@ -183,7 +183,7 @@ func (f *Front) listBuckets(w http.ResponseWriter) {
 	from := ""
 
 	for {
-		found, more := f.store.etcd.scan("bkt/", from, listLimit)
+		found, more := f.store.etcd.scan("bkt/", from, listLimit, false)
 
 		for _, entry := range found {
 			from = entry.key + "\x00"
@@ -198,12 +198,6 @@ func (f *Front) listBuckets(w http.ResponseWriter) {
 	writeXml(w, http.StatusOK, out)
 }
 
-func (f *Front) bucketExists(bucket string) bool {
-	_, found := f.store.etcd.get(bucketKey(bucket))
-
-	return found
-}
-
 func (f *Front) bucketOp(w http.ResponseWriter, r *http.Request, bucket string) {
 	if sub := subresource(r.URL.Query(), bucketSubresources); sub != "" {
 		f.bucketSub(w, r, bucket, sub)
@@ -213,17 +207,16 @@ func (f *Front) bucketOp(w http.ResponseWriter, r *http.Request, bucket string) 
 
 	switch r.Method {
 	case http.MethodPut:
-		if f.bucketExists(bucket) {
+		if !f.store.etcd.putIfAbsent(bucketKey(bucket), []byte(time.Now().UTC().Format(s3Time))) {
 			s3Fail(w, http.StatusConflict, "BucketAlreadyOwnedByYou", "bucket exists", "/"+bucket)
 
 			return
 		}
 
-		f.store.etcd.put(bucketKey(bucket), []byte(time.Now().UTC().Format(s3Time)))
 		w.Header().Set("Location", "/"+bucket)
 		w.WriteHeader(http.StatusOK)
 	case http.MethodHead:
-		if !f.bucketExists(bucket) {
+		if _, found := f.store.etcd.get(bucketKey(bucket)); !found {
 			w.WriteHeader(http.StatusNotFound)
 
 			return
@@ -231,13 +224,15 @@ func (f *Front) bucketOp(w http.ResponseWriter, r *http.Request, bucket string) 
 
 		w.WriteHeader(http.StatusOK)
 	case http.MethodDelete:
-		if !f.bucketExists(bucket) {
+		found, _, exists := f.store.etcd.scanIn(bucketKey(bucket), "obj/"+bucket+"/", "", 1, true)
+
+		if !exists {
 			s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", "/"+bucket)
 
 			return
 		}
 
-		if found, _ := f.store.etcd.scan("obj/"+bucket+"/", "", 1); len(found) > 0 {
+		if len(found) > 0 {
 			s3Fail(w, http.StatusConflict, "BucketNotEmpty", "bucket is not empty", "/"+bucket)
 
 			return
@@ -246,12 +241,6 @@ func (f *Front) bucketOp(w http.ResponseWriter, r *http.Request, bucket string) 
 		f.store.etcd.del(bucketKey(bucket))
 		w.WriteHeader(http.StatusNoContent)
 	case http.MethodGet:
-		if !f.bucketExists(bucket) {
-			s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", "/"+bucket)
-
-			return
-		}
-
 		f.listObjects(w, r, bucket)
 	default:
 		s3Fail(w, http.StatusMethodNotAllowed, "MethodNotAllowed", r.Method, "/"+bucket)
@@ -261,10 +250,12 @@ func (f *Front) bucketOp(w http.ResponseWriter, r *http.Request, bucket string) 
 func (f *Front) bucketSub(w http.ResponseWriter, r *http.Request, bucket, sub string) {
 	resource := "/" + bucket
 
-	if !f.bucketExists(bucket) {
-		s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", resource)
+	if sub != "delete" {
+		if _, found := f.store.etcd.get(bucketKey(bucket)); !found {
+			s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", resource)
 
-		return
+			return
+		}
 	}
 
 	switch {
@@ -293,13 +284,20 @@ func (f *Front) deleteObjects(w http.ResponseWriter, r *http.Request, bucket str
 	}
 
 	out := DeleteResult{}
+	keys := make([]string, 0, len(req.Objects))
 
 	for _, o := range req.Objects {
-		f.store.etcd.del(objKey(bucket, o.Key))
+		keys = append(keys, objKey(bucket, o.Key))
 
 		if !req.Quiet {
 			out.Deleted = append(out.Deleted, DeletedObject{Key: o.Key})
 		}
+	}
+
+	if !f.store.etcd.delAllIn(bucketKey(bucket), keys) {
+		s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", "/"+bucket)
+
+		return
 	}
 
 	writeXml(w, http.StatusOK, out)
@@ -327,7 +325,13 @@ func (f *Front) listObjects(w http.ResponseWriter, r *http.Request, bucket strin
 	}
 
 	out := ListBucketResult{Name: bucket, Prefix: prefix, Delimiter: delimiter, MaxKeys: maxKeys, EncodingType: q.Get("encoding-type")}
-	found := f.store.list(bucket, prefix, delimiter, after, maxKeys)
+	found, exists := f.store.list(bucket, prefix, delimiter, after, maxKeys)
+
+	if !exists {
+		s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", "/"+bucket)
+
+		return
+	}
 
 	for _, cp := range found.Dirs {
 		out.CommonPrefixes = append(out.CommonPrefixes, CommonPrefix{Prefix: encodeKey(cp, out.EncodingType)})
@@ -375,12 +379,6 @@ func encodeKey(key, encoding string) string {
 func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key string) {
 	resource := "/" + bucket + "/" + key
 
-	if !f.bucketExists(bucket) {
-		s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", resource)
-
-		return
-	}
-
 	if sub := subresource(r.URL.Query(), objectSubresources); sub != "" {
 		s3Fail(w, http.StatusNotImplemented, "NotImplemented", sub+" is not implemented", resource)
 
@@ -410,6 +408,12 @@ func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key str
 			return
 		}
 
+		if errors.Is(err, errNoSuchBucket) {
+			s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", resource)
+
+			return
+		}
+
 		if errors.Is(err, errTooFewCells) {
 			s3Fail(w, http.StatusServiceUnavailable, "SlowDown", err.Error(), resource)
 
@@ -422,11 +426,13 @@ func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key str
 	case http.MethodHead, http.MethodGet:
 		m, _, err := f.store.manifest(bucket, key)
 
-		if errors.Is(err, errNoSuchKey) {
+		if errors.Is(err, errNoSuchKey) || errors.Is(err, errNoSuchBucket) {
 			if r.Method == http.MethodHead {
 				w.WriteHeader(http.StatusNotFound)
-			} else {
+			} else if errors.Is(err, errNoSuchKey) {
 				s3Fail(w, http.StatusNotFound, "NoSuchKey", "no such key", resource)
+			} else {
+				s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", resource)
 			}
 
 			return
@@ -491,7 +497,12 @@ func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key str
 
 		w.Write(data[start:end])
 	case http.MethodDelete:
-		f.store.etcd.del(objKey(bucket, key))
+		if !f.store.etcd.delIn(bucketKey(bucket), objKey(bucket, key)) {
+			s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", resource)
+
+			return
+		}
+
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		s3Fail(w, http.StatusMethodNotAllowed, "MethodNotAllowed", r.Method, resource)

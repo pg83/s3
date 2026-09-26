@@ -216,10 +216,11 @@ type Link struct {
 	inbox   chan message
 	waiting map[uint64]message
 	last    uint64
+	up      chan struct{}
 }
 
-func newLink(addr string) *Link {
-	l := &Link{addr: addr, inbox: make(chan message, inboxDepth), waiting: map[uint64]message{}}
+func newLink(addr string, up chan struct{}) *Link {
+	l := &Link{addr: addr, inbox: make(chan message, inboxDepth), waiting: map[uint64]message{}, up: up}
 
 	go l.run()
 
@@ -253,6 +254,11 @@ func (l *Link) connect() net.Conn {
 
 			if down {
 				slog.Info("link: connected", "cell", l.addr)
+
+				select {
+				case l.up <- struct{}{}:
+				default:
+				}
 			}
 
 			return conn

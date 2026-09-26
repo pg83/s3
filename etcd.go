@@ -1,24 +1,17 @@
 package main
 
 import (
-	"bytes"
-	"encoding/base64"
-	"encoding/json"
-	"io"
-	"net/http"
-	"strconv"
-	"time"
+	"context"
+	"log/slog"
+
+	"go.etcd.io/etcd/api/v3/mvccpb"
+	clientv3 "go.etcd.io/etcd/client/v3"
 )
 
-type Etcd struct {
-	base string
-	http *http.Client
-}
+const txnOps = 128
 
-type KV struct {
-	Key         string `json:"key"`
-	Value       string `json:"value"`
-	ModRevision string `json:"mod_revision"`
+type Etcd struct {
+	c *clientv3.Client
 }
 
 type Entry struct {
@@ -28,61 +21,27 @@ type Entry struct {
 }
 
 func newEtcd(endpoints []string) *Etcd {
-	return &Etcd{base: endpoints[0], http: &http.Client{Timeout: 30 * time.Second}}
+	return &Etcd{c: throw2(clientv3.New(clientv3.Config{Endpoints: endpoints}))}
 }
 
-func b64(s []byte) string {
-	return base64.StdEncoding.EncodeToString(s)
-}
-
-func unb64(s string) []byte {
-	return throw2(base64.StdEncoding.DecodeString(s))
-}
-
-func (e *Etcd) call(path string, req any) map[string]json.RawMessage {
-	resp := throw2(e.http.Post(e.base+"/v3/kv/"+path, "application/json", bytes.NewReader(throw2(json.Marshal(req)))))
-
-	defer resp.Body.Close()
-
-	body := throw2(io.ReadAll(resp.Body))
-
-	if resp.StatusCode != http.StatusOK {
-		throwFmt("etcd %s: HTTP %d: %s", path, resp.StatusCode, body)
-	}
-
-	out := map[string]json.RawMessage{}
-
-	throw(json.Unmarshal(body, &out))
-
-	return out
-}
-
-func entries(raw json.RawMessage) []Entry {
-	var kvs []KV
-
-	if raw != nil {
-		throw(json.Unmarshal(raw, &kvs))
-	}
-
+func entries(kvs []*mvccpb.KeyValue) []Entry {
 	out := make([]Entry, 0, len(kvs))
 
 	for _, kv := range kvs {
-		rev, _ := strconv.ParseInt(kv.ModRevision, 10, 64)
-
-		out = append(out, Entry{key: string(unb64(kv.Key)), value: unb64(kv.Value), rev: rev})
+		out = append(out, Entry{key: string(kv.Key), value: kv.Value, rev: kv.ModRevision})
 	}
 
 	return out
 }
 
 func (e *Etcd) get(key string) (Entry, bool) {
-	found := entries(e.call("range", map[string]any{"key": b64([]byte(key))})["kvs"])
+	resp := throw2(e.c.Get(context.Background(), key))
 
-	if len(found) == 0 {
+	if len(resp.Kvs) == 0 {
 		return Entry{}, false
 	}
 
-	return found[0], true
+	return entries(resp.Kvs)[0], true
 }
 
 func prefixEnd(prefix string) string {
@@ -99,7 +58,7 @@ func prefixEnd(prefix string) string {
 	return "\x00"
 }
 
-func (e *Etcd) scan(prefix, from string, limit int) ([]Entry, bool) {
+func rangeOpts(prefix, from string, limit int, keysOnly bool) (string, []clientv3.OpOption, bool) {
 	start := prefix
 	end := prefixEnd(prefix)
 
@@ -108,66 +67,189 @@ func (e *Etcd) scan(prefix, from string, limit int) ([]Entry, bool) {
 	}
 
 	if end != "\x00" && start >= end {
+		return "", nil, false
+	}
+
+	opts := []clientv3.OpOption{clientv3.WithRange(end), clientv3.WithLimit(int64(limit))}
+
+	if keysOnly {
+		opts = append(opts, clientv3.WithKeysOnly())
+	}
+
+	return start, opts, true
+}
+
+func (e *Etcd) scan(prefix, from string, limit int, keysOnly bool) ([]Entry, bool) {
+	start, opts, ok := rangeOpts(prefix, from, limit, keysOnly)
+
+	if !ok {
 		return nil, false
 	}
 
-	out := e.call("range", map[string]any{
-		"key":       b64([]byte(start)),
-		"range_end": b64([]byte(end)),
-		"limit":     strconv.Itoa(limit),
-	})
+	resp := throw2(e.c.Get(context.Background(), start, opts...))
 
-	var more bool
+	return entries(resp.Kvs), resp.More
+}
 
-	if raw, ok := out["more"]; ok {
-		throw(json.Unmarshal(raw, &more))
+func (e *Etcd) scanIn(guard, prefix, from string, limit int, keysOnly bool) ([]Entry, bool, bool) {
+	start, opts, ok := rangeOpts(prefix, from, limit, keysOnly)
+
+	if !ok {
+		_, exists := e.get(guard)
+
+		return nil, false, exists
 	}
 
-	return entries(out["kvs"]), more
+	resp := throw2(e.c.Txn(context.Background()).
+		If(clientv3.Compare(clientv3.Version(guard), ">", 0)).
+		Then(clientv3.OpGet(start, opts...)).
+		Commit())
+
+	if !resp.Succeeded {
+		return nil, false, false
+	}
+
+	got := resp.Responses[0].GetResponseRange()
+
+	return entries(got.Kvs), got.More, true
+}
+
+func (e *Etcd) fetch(keys []string) map[string][]byte {
+	out := map[string][]byte{}
+
+	for i := 0; i < len(keys); i += txnOps {
+		chunk := keys[i:min(i+txnOps, len(keys))]
+		ops := make([]clientv3.Op, 0, len(chunk))
+
+		for _, k := range chunk {
+			ops = append(ops, clientv3.OpGet(k))
+		}
+
+		resp := throw2(e.c.Txn(context.Background()).Then(ops...).Commit())
+
+		for _, r := range resp.Responses {
+			for _, kv := range r.GetResponseRange().Kvs {
+				out[string(kv.Key)] = kv.Value
+			}
+		}
+	}
+
+	return out
+}
+
+func (e *Etcd) getIn(guard, key string) (Entry, bool, bool) {
+	resp := throw2(e.c.Txn(context.Background()).
+		If(clientv3.Compare(clientv3.Version(guard), ">", 0)).
+		Then(clientv3.OpGet(key)).
+		Commit())
+
+	if !resp.Succeeded {
+		return Entry{}, false, false
+	}
+
+	got := entries(resp.Responses[0].GetResponseRange().Kvs)
+
+	if len(got) == 0 {
+		return Entry{}, false, true
+	}
+
+	return got[0], true, true
 }
 
 func (e *Etcd) put(key string, value []byte) {
-	e.putRev(key, value)
+	throw2(e.c.Put(context.Background(), key, string(value)))
 }
 
-func (e *Etcd) putRev(key string, value []byte) int64 {
-	out := e.call("put", map[string]any{"key": b64([]byte(key)), "value": b64(value)})
+func (e *Etcd) putIn(guard, key string, value []byte) (int64, bool) {
+	resp := throw2(e.c.Txn(context.Background()).
+		If(clientv3.Compare(clientv3.Version(guard), ">", 0)).
+		Then(clientv3.OpPut(key, string(value))).
+		Commit())
 
-	var header struct {
-		Revision string `json:"revision"`
-	}
-
-	throw(json.Unmarshal(out["header"], &header))
-
-	return throw2(strconv.ParseInt(header.Revision, 10, 64))
+	return resp.Header.Revision, resp.Succeeded
 }
 
-func (e *Etcd) del(key string) {
-	e.call("deleterange", map[string]any{"key": b64([]byte(key))})
-}
+func (e *Etcd) putIfAbsent(key string, value []byte) bool {
+	resp := throw2(e.c.Txn(context.Background()).
+		If(clientv3.Compare(clientv3.Version(key), "=", 0)).
+		Then(clientv3.OpPut(key, string(value))).
+		Commit())
 
-func (e *Etcd) delPrefix(prefix string) {
-	e.call("deleterange", map[string]any{"key": b64([]byte(prefix)), "range_end": b64([]byte(prefixEnd(prefix)))})
+	return resp.Succeeded
 }
 
 func (e *Etcd) putIfRevision(key string, value []byte, rev int64) bool {
-	out := e.call("txn", map[string]any{
-		"compare": []map[string]any{{
-			"key":          b64([]byte(key)),
-			"target":       "MOD",
-			"result":       "EQUAL",
-			"mod_revision": strconv.FormatInt(rev, 10),
-		}},
-		"success": []map[string]any{{
-			"request_put": map[string]any{"key": b64([]byte(key)), "value": b64(value)},
-		}},
-	})
+	resp := throw2(e.c.Txn(context.Background()).
+		If(clientv3.Compare(clientv3.ModRevision(key), "=", rev)).
+		Then(clientv3.OpPut(key, string(value))).
+		Commit())
 
-	var ok bool
+	return resp.Succeeded
+}
 
-	if raw, found := out["succeeded"]; found {
-		throw(json.Unmarshal(raw, &ok))
+func (e *Etcd) del(key string) {
+	throw2(e.c.Delete(context.Background(), key))
+}
+
+func (e *Etcd) delIn(guard, key string) bool {
+	resp := throw2(e.c.Txn(context.Background()).
+		If(clientv3.Compare(clientv3.Version(guard), ">", 0)).
+		Then(clientv3.OpDelete(key)).
+		Commit())
+
+	return resp.Succeeded
+}
+
+func (e *Etcd) delAllIn(guard string, keys []string) bool {
+	for i := 0; i < len(keys); i += txnOps {
+		chunk := keys[i:min(i+txnOps, len(keys))]
+		ops := make([]clientv3.Op, 0, len(chunk))
+
+		for _, k := range chunk {
+			ops = append(ops, clientv3.OpDelete(k))
+		}
+
+		resp := throw2(e.c.Txn(context.Background()).
+			If(clientv3.Compare(clientv3.Version(guard), ">", 0)).
+			Then(ops...).
+			Commit())
+
+		if !resp.Succeeded {
+			return false
+		}
 	}
 
-	return ok
+	return true
+}
+
+func (e *Etcd) watch(prefix string) chan struct{} {
+	wake := make(chan struct{}, 1)
+
+	go func() {
+		for {
+			ch := e.c.Watch(context.Background(), prefix, clientv3.WithPrefix())
+
+			select {
+			case wake <- struct{}{}:
+			default:
+			}
+
+			for resp := range ch {
+				if err := resp.Err(); err != nil {
+					slog.Warn("etcd: watch", "prefix", prefix, "err", err)
+
+					break
+				}
+
+				if len(resp.Events) > 0 {
+					select {
+					case wake <- struct{}{}:
+					default:
+					}
+				}
+			}
+		}
+	}()
+
+	return wake
 }

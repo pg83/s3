@@ -8,7 +8,6 @@ import (
 	"net"
 	"sort"
 	"strings"
-	"time"
 )
 
 type Repairer struct {
@@ -35,26 +34,31 @@ func runRepair(cfg *Config, host string) {
 	}
 
 	r := &Repairer{store: s, host: host}
+	prefix := "repair/" + host + "/"
 
 	slog.Info("repair: watching the queue", "host", host, "cells", len(local))
 
+	wake := s.etcd.watch(prefix)
+
 	for {
+		select {
+		case <-wake:
+		case <-s.up:
+		}
+
 		try(func() {
-			r.pass()
+			r.pass(prefix)
 		}).catch(func(exc *Exception) {
 			slog.Error("repair", "err", exc.error())
 		})
-
-		time.Sleep(5 * time.Second)
 	}
 }
 
-func (r *Repairer) pass() {
-	prefix := "repair/" + r.host + "/"
+func (r *Repairer) pass(prefix string) {
 	from := ""
 
 	for {
-		found, more := r.store.etcd.scan(prefix, from, 100)
+		found, more := r.store.etcd.scan(prefix, from, 100, true)
 
 		for _, entry := range found {
 			from = entry.key + "\x00"

@@ -264,7 +264,7 @@ func (wb *Web) page(w http.ResponseWriter, r *http.Request, fill func(*http.Requ
 func (wb *Web) buckets(r *http.Request, page *WebPage) {
 	page.Page = "buckets"
 
-	found, _ := wb.store.etcd.scan("bkt/", "", listLimit)
+	found, _ := wb.store.etcd.scan("bkt/", "", listLimit, false)
 
 	for _, entry := range found {
 		page.Buckets = append(page.Buckets, WebBucket{Name: strings.TrimPrefix(entry.key, "bkt/"), Created: string(entry.value)})
@@ -281,11 +281,11 @@ func (wb *Web) bucket(r *http.Request, page *WebPage) {
 		throwFmt("no such bucket")
 	}
 
-	if _, found := wb.store.etcd.get("bkt/" + page.Bucket); !found {
+	found, exists := wb.store.list(page.Bucket, page.Prefix, "/", r.URL.Query().Get("after"), pageLimit)
+
+	if !exists {
 		throwFmt("no such bucket: %s", page.Bucket)
 	}
-
-	found := wb.store.list(page.Bucket, page.Prefix, "/", r.URL.Query().Get("after"), pageLimit)
 
 	for _, cp := range found.Dirs {
 		page.Entries = append(page.Entries, WebEntry{Name: strings.TrimPrefix(cp, page.Prefix), URL: dirURL(page.Bucket, cp), Dir: true})

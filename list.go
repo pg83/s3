@@ -16,7 +16,7 @@ type Listing struct {
 	Next    string
 }
 
-func (s *Store) list(bucket, prefix, delimiter, after string, maxKeys int) Listing {
+func (s *Store) list(bucket, prefix, delimiter, after string, maxKeys int) (Listing, bool) {
 	root := "obj/" + bucket + "/"
 	from := root + prefix
 
@@ -30,18 +30,32 @@ func (s *Store) list(bucket, prefix, delimiter, after string, maxKeys int) Listi
 
 	out := Listing{}
 	seen := map[string]bool{}
+
+	var keys []string
+
 	last := ""
 	skip := ""
 	count := 0
+	truncated := false
 
-	for count < maxKeys {
-		found, more := s.etcd.scan(root+prefix, from, listLimit)
+	for count < maxKeys && !truncated {
+		found, more, exists := s.etcd.scanIn(bucketKey(bucket), root+prefix, from, min(listLimit, maxKeys-count+1), true)
+
+		if !exists {
+			return out, false
+		}
 
 		for _, entry := range found {
 			rel := strings.TrimPrefix(entry.key, root)
 
 			if skip != "" && strings.HasPrefix(rel, skip) {
 				continue
+			}
+
+			if count == maxKeys {
+				truncated = true
+
+				break
 			}
 
 			from = entry.key + "\x00"
@@ -60,24 +74,13 @@ func (s *Store) list(bucket, prefix, delimiter, after string, maxKeys int) Listi
 					skip = cp
 					from = prefixEnd(root + cp)
 
-					if count >= maxKeys {
-						break
-					}
-
 					continue
 				}
 			}
 
-			m := Manifest{}
-
-			throw(json.Unmarshal(entry.value, &m))
-			out.Objects = append(out.Objects, Listed{Key: rel, Manifest: m})
+			keys = append(keys, entry.key)
 			count++
 			last = rel
-
-			if count >= maxKeys {
-				break
-			}
 		}
 
 		if !more || len(found) == 0 {
@@ -85,11 +88,24 @@ func (s *Store) list(bucket, prefix, delimiter, after string, maxKeys int) Listi
 		}
 	}
 
-	if count >= maxKeys {
-		if found, _ := s.etcd.scan(root+prefix, from, 1); len(found) > 0 {
-			out.Next = last
-		}
+	if truncated || (count == maxKeys && s.beyond(bucket, root+prefix, from)) {
+		out.Next = last
 	}
 
-	return out
+	values := s.etcd.fetch(keys)
+
+	for _, key := range keys {
+		m := Manifest{}
+
+		throw(json.Unmarshal(values[key], &m))
+		out.Objects = append(out.Objects, Listed{Key: strings.TrimPrefix(key, root), Manifest: m})
+	}
+
+	return out, true
+}
+
+func (s *Store) beyond(bucket, prefix, from string) bool {
+	found, _ := s.etcd.scan(prefix, from, 1, true)
+
+	return len(found) > 0
 }

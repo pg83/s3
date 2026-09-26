@@ -117,6 +117,12 @@ revision and drops the entry. A key that was overwritten or deleted
 meanwhile is skipped. A host that stays down keeps its queue, and its
 keys at two sources, until it returns; nobody repairs on its behalf.
 
+The handler does not poll. It watches its prefix in etcd and walks the
+queue when the watch opens and on every change under it; a fix that
+failed because a cell was down stays in the queue, and the queue is
+walked again when any of the process's links reconnects, which is the
+moment such a fix can succeed.
+
 ## Metadata
 
 ```
@@ -125,10 +131,17 @@ repair/<host>/<bucket>/<key>   -> this host owes a piece
 bkt/<bucket>            -> bucket settings
 ```
 
-Listing is a range scan over `obj/<bucket>/<prefix>`; a delimiter is a
-seek past each common prefix. Deleting an object deletes its key and
-touches no cell; `POST /<bucket>?delete` does that for up to a thousand
-keys at once. A bucket has no settings yet: `?location` and
+etcd is spoken to over its gRPC client, and every operation on a bucket
+is one round trip that carries the bucket's existence as a transaction
+guard: a put, get, delete or listing under a bucket that is not there
+fails inside etcd and comes back as NoSuchBucket without a lookup of
+its own. Listing is a range scan over `obj/<bucket>/<prefix>` that asks
+for keys only, one key past the page so truncation is known without a
+second scan, and then fetches the manifests of the page in one
+transaction; a delimiter is a seek past each common prefix. Deleting
+an object deletes its key and touches no cell; `POST /<bucket>?delete`
+does that for up to a thousand keys in transactions of 128. A bucket
+has no settings yet: `?location` and
 `?versioning` answer with an empty configuration, `?policy` with
 NoSuchBucketPolicy, and every other bucket or object subresource with
 NotImplemented rather than with a listing that happens to share the URL.
