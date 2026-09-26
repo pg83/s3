@@ -1,8 +1,9 @@
 # s3
 
-S3 store over append-only cells and etcd. The design is in `README.md`;
-what is deliberately left out of the MVP is listed there too, do not add
-it back without being asked.
+S3 store over append-only cells and etcd. `README.md` is for users only:
+what it is, how to build and run it, what to expect, what it does not do.
+The Limits there are deliberate; do not add any of it back without being
+asked. The why of every design decision lives in the commit messages.
 
 ## Conventions
 
@@ -42,4 +43,4 @@ it back without being asked.
   `.github/workflows/ci.yml` and `codecov.yml`.
 - `./lint.sh` before committing style-sensitive changes; it strips every
   comment that is not a compiler directive. What code does belongs in its
-  name, why it exists belongs in the commit message and in `README.md`.
+  name, why it exists belongs in the commit message.
