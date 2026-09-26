@@ -22,7 +22,11 @@ reads and writes do not fight over one: `-store` takes the writes,
 store: a writer wakes every 50 ms, writes everything that arrived
 since the last tick, fsyncs once and only then answers with the offsets.
 A block that is full is renamed to plain `<n>`; a second goroutine
-copies those to the raw HDD at `n * 2 MiB`, fsyncs and removes them.
+copies every full block it finds to the raw HDD at `n * 2 MiB`, then
+flushes the disk once for the whole batch and removes the files: a
+flush costs a drive-managed SMR disk a hundred milliseconds, so it is
+paid per batch, not per block, and a batch interrupted before its flush
+is simply written again at the same offsets on the next start.
 A store with no room left is the HDD falling behind: the writer waits
 for the flusher to free a block and writes again, and everything above
 it waits in turn. The HDD is opened with `O_DIRECT`, so neither the copies

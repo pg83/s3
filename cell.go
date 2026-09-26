@@ -349,35 +349,39 @@ func (c *Cell) flusher() {
 func (c *Cell) flush(buf []byte) {
 	full := blockNumbers(c.store, "")
 
-	for i, num := range full {
-		start := time.Now()
+	if len(full) == 0 {
+		return
+	}
+
+	start := time.Now()
+
+	for _, num := range full {
 		f := throw2(os.Open(c.readyPath(num)))
 
 		throw2(io.ReadFull(f, buf))
 		throw(f.Close())
-
-		read := time.Now()
-
 		throw2(c.hdd.WriteAt(buf, num*blockSize))
+	}
 
-		wrote := time.Now()
+	wrote := time.Now()
 
-		throw(c.hdd.Sync())
+	throw(c.hdd.Sync())
 
-		synced := time.Now()
+	synced := time.Now()
 
+	for _, num := range full {
 		throw(os.Remove(c.readyPath(num)))
-
-		slog.Debug("cell: flushed", "block", num, "waiting", len(full)-i-1,
-			"read", read.Sub(start), "write", wrote.Sub(read), "sync", synced.Sub(wrote))
-
-		select {
-		case c.freed <- struct{}{}:
-		default:
-		}
 	}
 
 	syncDir(c.store)
+
+	select {
+	case c.freed <- struct{}{}:
+	default:
+	}
+
+	slog.Debug("cell: flushed", "blocks", len(full), "first", full[0], "last", full[len(full)-1],
+		"write", wrote.Sub(start), "sync", synced.Sub(wrote), "remove", time.Since(synced))
 }
 
 func (c *Cell) read(off int64, n int64) ([]byte, error) {
