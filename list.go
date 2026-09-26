@@ -16,7 +16,7 @@ type Listing struct {
 	Next    string
 }
 
-func (s *Store) list(bucket, prefix, delimiter, after string, maxKeys int) (Listing, bool) {
+func (s *Store) list(bucket, prefix, delimiter, after string, maxKeys int) Listing {
 	root := "obj/" + bucket + "/"
 	from := root + prefix
 
@@ -39,11 +39,7 @@ func (s *Store) list(bucket, prefix, delimiter, after string, maxKeys int) (List
 	truncated := false
 
 	for count < maxKeys && !truncated {
-		found, more, exists := s.etcd.scanIn(bucketKey(bucket), root+prefix, from, min(listLimit, maxKeys-count+1), true)
-
-		if !exists {
-			return out, false
-		}
+		found, more := s.etcd.scan(root+prefix, from, min(listLimit, maxKeys-count+1), true)
 
 		for _, entry := range found {
 			rel := strings.TrimPrefix(entry.key, root)
@@ -88,7 +84,7 @@ func (s *Store) list(bucket, prefix, delimiter, after string, maxKeys int) (List
 		}
 	}
 
-	if truncated || (count == maxKeys && s.beyond(bucket, root+prefix, from)) {
+	if truncated || (count == maxKeys && s.beyond(root+prefix, from)) {
 		out.Next = last
 	}
 
@@ -107,10 +103,10 @@ func (s *Store) list(bucket, prefix, delimiter, after string, maxKeys int) (List
 		out.Objects = append(out.Objects, Listed{Key: strings.TrimPrefix(key, root), Manifest: m})
 	}
 
-	return out, true
+	return out
 }
 
-func (s *Store) beyond(bucket, prefix, from string) bool {
+func (s *Store) beyond(prefix, from string) bool {
 	found, _ := s.etcd.scan(prefix, from, 1, true)
 
 	return len(found) > 0

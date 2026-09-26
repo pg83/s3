@@ -146,18 +146,18 @@ def show(state):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--endpoint", default="https://s3.lab.mesh")
-    ap.add_argument("--bucket", default="")
+    ap.add_argument("--bucket", required=True, help="a bucket of the front's config")
     ap.add_argument("--count", type=int, default=400)
     ap.add_argument("--threads", type=int, default=16)
     ap.add_argument("--hosts", default="", help="comma-separated lab hosts to inspect over ssh")
     ap.add_argument("--insecure", action="store_true")
-    ap.add_argument("--keep", action="store_true", help="leave the objects and the bucket in place")
+    ap.add_argument("--keep", action="store_true", help="leave the objects in place")
     args = ap.parse_args()
 
     s3 = S3(args.endpoint, args.insecure)
     hosts = [h for h in args.hosts.split(",") if h]
     run = time.strftime("%Y%m%d-%H%M%S")
-    bucket = args.bucket or f"stand-{run}"
+    bucket = args.bucket
     prefix = f"run/{run}/"
     rnd = random.Random(run)
     objects = {}
@@ -169,10 +169,10 @@ def main():
     total = sum(len(v) for v in objects.values())
     print(f"stand {run}: {args.count} objects, {total / (1 << 20):.1f} MiB, bucket {bucket}")
 
-    status, _, body = s3.request("PUT", f"/{bucket}")
+    status, _, _ = s3.request("HEAD", f"/{bucket}")
 
-    if status not in (200, 409):
-        fail(f"create bucket: {status} {body[:200]}")
+    if status != 200:
+        fail(f"bucket {bucket}: {status}")
 
     if hosts:
         print("== cells before")
@@ -298,12 +298,6 @@ def main():
 
         if left:
             fail(f"{len(left)} keys left after the deletes")
-
-    if not args.bucket:
-        status, _, _ = s3.request("DELETE", f"/{bucket}")
-
-        if status != 204:
-            fail(f"delete bucket: {status}")
 
     if hosts:
         print("== cells after")

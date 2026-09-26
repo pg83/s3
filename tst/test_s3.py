@@ -1,5 +1,5 @@
-"""The S3 front over nine cells on three hosts and one etcd: buckets,
-objects of every size, listing with prefixes and delimiters, ranges,
+"""The S3 front over nine cells on three hosts and one etcd: the buckets
+of the config, objects of every size, listing with prefixes and delimiters, ranges,
 deletes; a host down at write time leaves two pieces and that host's
 repair adds the third into its own cells; a host down at read time and
 a corrupt piece are both served through the parity."""
@@ -23,21 +23,17 @@ if etcd is None:
     raise SystemExit(0)
 
 etcd.start()
-cluster = lib.Cluster(etcd, hosts=3, cells=3, hdd_bytes=64 * MB).start()
+cluster = lib.Cluster(etcd, hosts=3, cells=3, hdd_bytes=64 * MB, buckets=["photos", "burst", "multi"]).start()
 s3 = cluster.s3()
 
 # buckets
 status, _, _ = s3.request("PUT", "/photos")
-if status != 200:
-    lib.fail(f"create bucket: {status}")
-
-status, _, _ = s3.request("PUT", "/photos")
 if status != 409:
-    lib.fail(f"create bucket twice: {status}")
+    lib.fail(f"create a configured bucket: {status}")
 
 status, _, body = s3.request("GET", "/")
 names = [b.find(NS + "Name").text for b in ET.fromstring(body).iter(NS + "Bucket")]
-if status != 200 or names != ["photos"]:
+if status != 200 or names != ["burst", "multi", "photos"]:
     lib.fail(f"list buckets: {status} {names}")
 
 status, _, _ = s3.request("HEAD", "/nope")
@@ -89,7 +85,6 @@ if status != 416:
 # many requests in flight on the same cell connections
 import threading
 
-s3.request("PUT", "/burst")
 burst = {f"{i:02d}": os.urandom(MB + i) for i in range(16)}
 failures = []
 
@@ -224,8 +219,8 @@ if status != 404:
     lib.fail(f"get deleted: {status}")
 
 status, _, _ = s3.request("DELETE", "/photos")
-if status != 409:
-    lib.fail(f"delete non-empty bucket: {status}")
+if status != 403:
+    lib.fail(f"delete a configured bucket: {status}")
 
 # a repair refuses a config that reaches its own cells over the network
 with open(cluster.config) as f:
@@ -350,7 +345,6 @@ if status != 501 or b"NotImplemented" not in body:
     lib.fail(f"object ?tagging: {status} {body[:200]}")
 
 # multi-object delete
-status, _, _ = s3.request("PUT", "/multi")
 for key in ("x", "y", "z"):
     s3.request("PUT", "/multi/" + key, b"1")
 

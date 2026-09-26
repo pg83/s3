@@ -109,16 +109,15 @@ td.number.short{color:var(--warn)}
   <div class="error" role="alert"{{if not .Error}} hidden{{end}}>{{.Error}}</div>
   {{if eq .Page "buckets"}}
   <table class="buckets" aria-label="Buckets">
-    <colgroup><col class="name"><col class="time"></colgroup>
-    <thead><tr><th scope="col">Bucket</th><th scope="col" class="number">Created</th></tr></thead>
+    <colgroup><col class="name"></colgroup>
+    <thead><tr><th scope="col">Bucket</th></tr></thead>
     <tbody>
     {{range .Buckets}}
       <tr>
         <td><div class="entry"><span class="dot" aria-hidden="true"></span><div class="entry-body"><a class="entry-link" href="/b/{{.Name}}"><div class="entry-name">{{.Name}}</div></a></div></div></td>
-        <td class="number"><time class="clock" datetime="{{.Created}}" title="{{.Created}}">{{stamp .Created}}</time></td>
       </tr>
     {{else}}
-      <tr><td colspan="2" class="empty">no buckets</td></tr>
+      <tr><td class="empty">no buckets</td></tr>
     {{end}}
     </tbody>
   </table>
@@ -189,8 +188,7 @@ type Web struct {
 }
 
 type WebBucket struct {
-	Name    string
-	Created string
+	Name string
 }
 
 type WebCrumb struct {
@@ -264,10 +262,8 @@ func (wb *Web) page(w http.ResponseWriter, r *http.Request, fill func(*http.Requ
 func (wb *Web) buckets(r *http.Request, page *WebPage) {
 	page.Page = "buckets"
 
-	found, _ := wb.store.etcd.scan("bkt/", "", listLimit, false)
-
-	for _, entry := range found {
-		page.Buckets = append(page.Buckets, WebBucket{Name: strings.TrimPrefix(entry.key, "bkt/"), Created: string(entry.value)})
+	for _, b := range wb.store.buckets {
+		page.Buckets = append(page.Buckets, WebBucket{Name: b})
 	}
 }
 
@@ -281,11 +277,11 @@ func (wb *Web) bucket(r *http.Request, page *WebPage) {
 		throwFmt("no such bucket")
 	}
 
-	found, exists := wb.store.list(page.Bucket, page.Prefix, "/", r.URL.Query().Get("after"), pageLimit)
-
-	if !exists {
+	if !wb.store.known[page.Bucket] {
 		throwFmt("no such bucket: %s", page.Bucket)
 	}
+
+	found := wb.store.list(page.Bucket, page.Prefix, "/", r.URL.Query().Get("after"), pageLimit)
 
 	for _, cp := range found.Dirs {
 		page.Entries = append(page.Entries, WebEntry{Name: strings.TrimPrefix(cp, page.Prefix), URL: dirURL(page.Bucket, cp), Dir: true})

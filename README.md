@@ -128,20 +128,23 @@ moment such a fix can succeed.
 ```
 obj/<bucket>/<key>      -> id, size, md5 (the ETag), mtime
 repair/<host>/<bucket>/<key>   -> this host owes a piece
-bkt/<bucket>            -> bucket settings
 ```
 
-etcd is spoken to over its gRPC client, and every operation on a bucket
-is one round trip that carries the bucket's existence as a transaction
-guard: a put, get, delete or listing under a bucket that is not there
-fails inside etcd and comes back as NoSuchBucket without a lookup of
-its own. Listing is a range scan over `obj/<bucket>/<prefix>` that asks
+The buckets are the config's, a static list every front, repair and
+web shares: nothing about them lives in etcd, a bucket that is not in
+the list answers NoSuchBucket before etcd is asked, and the API neither
+creates nor deletes one (PUT of a listed bucket says it is already
+owned, PUT of any other and DELETE of any say AccessDenied). Credentials
+will come the same way when they are needed.
+
+etcd is spoken to over its gRPC client, one round trip per operation.
+Listing is a range scan over `obj/<bucket>/<prefix>` that asks
 for keys only, one key past the page so truncation is known without a
 second scan, and then fetches the manifests of the page in one
 transaction; a delimiter is a seek past each common prefix. Deleting
 an object deletes its key and touches no cell; `POST /<bucket>?delete`
 does that for up to a thousand keys in transactions of 128. A bucket
-has no settings yet: `?location` and
+has no settings: `?location` and
 `?versioning` answer with an empty configuration, `?policy` with
 NoSuchBucketPolicy, and every other bucket or object subresource with
 NotImplemented rather than with a listing that happens to share the URL.
@@ -221,6 +224,7 @@ Config is JSON:
 ```json
 {
   "etcd": ["http://127.0.0.1:2379"],
+  "buckets": ["photos", "backups"],
   "cells": [
     {"id": 0, "host": "lab1", "addr": "192.168.103.16:9100"},
     {"id": 1, "host": "lab1", "addr": "192.168.103.16:9101"}
@@ -234,7 +238,8 @@ No compaction: a full cell is emptied and refilled. No scrub. No
 rebuild walk over etcd for a lost cell. No limits on object size or
 concurrent uploads. No range reads served without assembling the whole
 object. No multipart uploads, no server-side copy, no signatures
-checked, no CORS, no bucket policies, ACLs or versioning.
+checked, no CORS, no bucket policies, ACLs or versioning, no buckets
+made over the API.
 
 ## Build and test
 
@@ -244,6 +249,7 @@ binary, `S3_TEST_ETCD=/path/to/etcd` or `etcd` on PATH. `dev/stand.py`
 drives a live stand through a few hundred objects of mixed sizes: put,
 list, the flush to the HDD, reads from the HDD and then from the load,
 ranges, an overwrite, deletes one by one and in bulk, with timings;
-`--hosts` adds a look inside every cell over ssh. Run it on a host
+`--hosts` adds a look inside every cell over ssh, `--bucket` names a
+bucket of the config. Run it on a host
 against the local front to measure the stand rather than the way in. See `STYLE.md` for the code style
 and `CLAUDE.md` for the working conventions.

@@ -58,8 +58,7 @@ type Owner struct {
 }
 
 type BucketInfo struct {
-	Name         string `xml:"Name"`
-	CreationDate string `xml:"CreationDate"`
+	Name string `xml:"Name"`
 }
 
 type ListAllMyBucketsResult struct {
@@ -171,6 +170,8 @@ func (f *Front) route(w http.ResponseWriter, r *http.Request) {
 		}
 
 		f.listBuckets(w)
+	case !f.store.known[bucket]:
+		f.unknownBucket(w, r, bucket, key)
 	case key == "":
 		f.bucketOp(w, r, bucket)
 	default:
@@ -178,21 +179,22 @@ func (f *Front) route(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (f *Front) unknownBucket(w http.ResponseWriter, r *http.Request, bucket, key string) {
+	switch {
+	case key == "" && r.Method == http.MethodPut:
+		s3Fail(w, http.StatusForbidden, "AccessDenied", "buckets are configured, not created", "/"+bucket)
+	case r.Method == http.MethodHead:
+		w.WriteHeader(http.StatusNotFound)
+	default:
+		s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", r.URL.Path)
+	}
+}
+
 func (f *Front) listBuckets(w http.ResponseWriter) {
 	out := ListAllMyBucketsResult{Owner: Owner{ID: "s3", DisplayName: "s3"}}
-	from := ""
 
-	for {
-		found, more := f.store.etcd.scan("bkt/", from, listLimit, false)
-
-		for _, entry := range found {
-			from = entry.key + "\x00"
-			out.Buckets = append(out.Buckets, BucketInfo{Name: strings.TrimPrefix(entry.key, "bkt/"), CreationDate: string(entry.value)})
-		}
-
-		if !more {
-			break
-		}
+	for _, b := range f.store.buckets {
+		out.Buckets = append(out.Buckets, BucketInfo{Name: b})
 	}
 
 	writeXml(w, http.StatusOK, out)
@@ -207,39 +209,11 @@ func (f *Front) bucketOp(w http.ResponseWriter, r *http.Request, bucket string) 
 
 	switch r.Method {
 	case http.MethodPut:
-		if !f.store.etcd.putIfAbsent(bucketKey(bucket), []byte(time.Now().UTC().Format(s3Time))) {
-			s3Fail(w, http.StatusConflict, "BucketAlreadyOwnedByYou", "bucket exists", "/"+bucket)
-
-			return
-		}
-
-		w.Header().Set("Location", "/"+bucket)
-		w.WriteHeader(http.StatusOK)
+		s3Fail(w, http.StatusConflict, "BucketAlreadyOwnedByYou", "bucket exists", "/"+bucket)
 	case http.MethodHead:
-		if _, found := f.store.etcd.get(bucketKey(bucket)); !found {
-			w.WriteHeader(http.StatusNotFound)
-
-			return
-		}
-
 		w.WriteHeader(http.StatusOK)
 	case http.MethodDelete:
-		found, _, exists := f.store.etcd.scanIn(bucketKey(bucket), "obj/"+bucket+"/", "", 1, true)
-
-		if !exists {
-			s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", "/"+bucket)
-
-			return
-		}
-
-		if len(found) > 0 {
-			s3Fail(w, http.StatusConflict, "BucketNotEmpty", "bucket is not empty", "/"+bucket)
-
-			return
-		}
-
-		f.store.etcd.del(bucketKey(bucket))
-		w.WriteHeader(http.StatusNoContent)
+		s3Fail(w, http.StatusForbidden, "AccessDenied", "buckets are configured, not deleted", "/"+bucket)
 	case http.MethodGet:
 		f.listObjects(w, r, bucket)
 	default:
@@ -249,14 +223,6 @@ func (f *Front) bucketOp(w http.ResponseWriter, r *http.Request, bucket string) 
 
 func (f *Front) bucketSub(w http.ResponseWriter, r *http.Request, bucket, sub string) {
 	resource := "/" + bucket
-
-	if sub != "delete" {
-		if _, found := f.store.etcd.get(bucketKey(bucket)); !found {
-			s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", resource)
-
-			return
-		}
-	}
 
 	switch {
 	case sub == "delete" && r.Method == http.MethodPost:
@@ -294,11 +260,7 @@ func (f *Front) deleteObjects(w http.ResponseWriter, r *http.Request, bucket str
 		}
 	}
 
-	if !f.store.etcd.delAllIn(bucketKey(bucket), keys) {
-		s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", "/"+bucket)
-
-		return
-	}
+	f.store.etcd.delAll(keys)
 
 	writeXml(w, http.StatusOK, out)
 }
@@ -325,13 +287,7 @@ func (f *Front) listObjects(w http.ResponseWriter, r *http.Request, bucket strin
 	}
 
 	out := ListBucketResult{Name: bucket, Prefix: prefix, Delimiter: delimiter, MaxKeys: maxKeys, EncodingType: q.Get("encoding-type")}
-	found, exists := f.store.list(bucket, prefix, delimiter, after, maxKeys)
-
-	if !exists {
-		s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", "/"+bucket)
-
-		return
-	}
+	found := f.store.list(bucket, prefix, delimiter, after, maxKeys)
 
 	for _, cp := range found.Dirs {
 		out.CommonPrefixes = append(out.CommonPrefixes, CommonPrefix{Prefix: encodeKey(cp, out.EncodingType)})
@@ -408,12 +364,6 @@ func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key str
 			return
 		}
 
-		if errors.Is(err, errNoSuchBucket) {
-			s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", resource)
-
-			return
-		}
-
 		if errors.Is(err, errTooFewCells) {
 			s3Fail(w, http.StatusServiceUnavailable, "SlowDown", err.Error(), resource)
 
@@ -426,13 +376,11 @@ func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key str
 	case http.MethodHead, http.MethodGet:
 		m, _, err := f.store.manifest(bucket, key)
 
-		if errors.Is(err, errNoSuchKey) || errors.Is(err, errNoSuchBucket) {
+		if errors.Is(err, errNoSuchKey) {
 			if r.Method == http.MethodHead {
 				w.WriteHeader(http.StatusNotFound)
-			} else if errors.Is(err, errNoSuchKey) {
-				s3Fail(w, http.StatusNotFound, "NoSuchKey", "no such key", resource)
 			} else {
-				s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", resource)
+				s3Fail(w, http.StatusNotFound, "NoSuchKey", "no such key", resource)
 			}
 
 			return
@@ -497,12 +445,7 @@ func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key str
 
 		w.Write(data[start:end])
 	case http.MethodDelete:
-		if !f.store.etcd.delIn(bucketKey(bucket), objKey(bucket, key)) {
-			s3Fail(w, http.StatusNotFound, "NoSuchBucket", "no such bucket", resource)
-
-			return
-		}
-
+		f.store.etcd.del(objKey(bucket, key))
 		w.WriteHeader(http.StatusNoContent)
 	default:
 		s3Fail(w, http.StatusMethodNotAllowed, "MethodNotAllowed", r.Method, resource)

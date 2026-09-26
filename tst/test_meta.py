@@ -1,10 +1,10 @@
-"""The metadata paths: a missing bucket is reported by every operation
-from the one etcd round trip that operation makes anyway; a bucket is
-created, filled, refused while full, emptied and deleted; a listing of
-hundreds of keys comes back complete, with exact truncation at the last
-key, paged by keys and by folders; three hundred keys go in one delete
-request; a repair whose own cells were down when the key was queued
-finishes as soon as they are back, without a restart or a poll."""
+"""The metadata paths: the buckets are the config's, so a bucket that
+is not there is reported by every operation without asking etcd, and
+none is created or deleted over the API; a listing of hundreds of keys
+comes back complete, with exact truncation at the last key, paged by
+keys and by folders; three hundred keys go in one delete request; a
+repair whose own cells were down when the key was queued finishes as
+soon as they are back, without a restart or a poll."""
 
 import base64
 import json
@@ -25,7 +25,7 @@ if etcd is None:
     raise SystemExit(0)
 
 etcd.start()
-cluster = lib.Cluster(etcd, hosts=3, cells=3, hdd_bytes=64 * MB).start()
+cluster = lib.Cluster(etcd, hosts=3, cells=3, hdd_bytes=64 * MB, buckets=["photos", "many", "life"]).start()
 s3 = cluster.s3()
 
 
@@ -83,56 +83,48 @@ for path in ("/nope", "/nope/k"):
     if status != 404:
         lib.fail(f"HEAD {path} on a missing bucket: {status}")
 
-if keys_under("obj/nope/") or keys_under("repair/"):
-    lib.fail(f"a missing bucket left keys behind: {keys_under('obj/nope/')} {keys_under('repair/')}")
+status, _, out = s3.request("PUT", "/nope")
+if status != 403 or b"AccessDenied" not in out:
+    lib.fail(f"create a bucket over the API: {status} {out[:200]}")
 
-# the bucket's life
-status, _, _ = s3.request("PUT", "/life")
-if status != 200:
-    lib.fail(f"create bucket: {status}")
+if keys_under("obj/nope/") or keys_under("repair/") or keys_under("bkt/"):
+    lib.fail(f"a missing bucket left keys behind: {keys_under('obj/nope/')} {keys_under('repair/')} {keys_under('bkt/')}")
+
+# the buckets are the config's
+status, _, body = s3.request("GET", "/")
+names = [b.find(NS + "Name").text for b in ET.fromstring(body).iter(NS + "Bucket")]
+if status != 200 or names != ["life", "many", "photos"]:
+    lib.fail(f"list buckets: {status} {names}")
 
 status, _, out = s3.request("PUT", "/life")
 if status != 409 or b"BucketAlreadyOwnedByYou" not in out:
-    lib.fail(f"create bucket twice: {status} {out[:200]}")
+    lib.fail(f"create a configured bucket: {status} {out[:200]}")
+
+status, _, _ = s3.request("HEAD", "/life")
+if status != 200:
+    lib.fail(f"head a configured bucket: {status}")
 
 status, _, out = s3.request("GET", "/life/nope")
 if status != 404 or b"NoSuchKey" not in out or b"NoSuchBucket" in out:
-    lib.fail(f"missing key in a live bucket: {status} {out[:200]}")
+    lib.fail(f"missing key in a configured bucket: {status} {out[:200]}")
 
 status, _, _ = s3.request("PUT", "/life/k", b"data")
 if status != 200:
     lib.fail(f"put: {status}")
 
-status, _, out = s3.request("DELETE", "/life")
-if status != 409 or b"BucketNotEmpty" not in out:
-    lib.fail(f"delete a full bucket: {status} {out[:200]}")
+for full in (True, False):
+    status, _, out = s3.request("DELETE", "/life")
+    if status != 403 or b"AccessDenied" not in out:
+        lib.fail(f"delete a configured bucket, full={full}: {status} {out[:200]}")
 
-for _ in range(2):
     status, _, _ = s3.request("DELETE", "/life/k")
     if status != 204:
         lib.fail(f"delete key: {status}")
 
-status, _, _ = s3.request("DELETE", "/life")
-if status != 204:
-    lib.fail(f"delete an empty bucket: {status}")
-
-status, _, _ = s3.request("HEAD", "/life")
-if status != 404:
-    lib.fail(f"head a deleted bucket: {status}")
-
-status, _, out = s3.request("PUT", "/life/k", b"data")
-if status != 404 or b"NoSuchBucket" not in out:
-    lib.fail(f"put into a deleted bucket: {status} {out[:200]}")
-
-status, _, _ = s3.request("PUT", "/life")
-if status != 200:
-    lib.fail(f"recreate bucket: {status}")
-
-if keys_under("obj/life/"):
-    lib.fail(f"a recreated bucket is not empty: {keys_under('obj/life/')}")
+if keys_under("obj/life/") or keys_under("bkt/"):
+    lib.fail(f"keys left behind: {keys_under('obj/life/')} {keys_under('bkt/')}")
 
 # hundreds of keys
-s3.request("PUT", "/many")
 many = {f"k{i:04d}": bytes([i % 251]) * (i % 7 + 1) for i in range(300)}
 many.update({f"d/{i}": b"folder" for i in range(5)})
 failures = []
@@ -221,13 +213,8 @@ if status != 200 or list(ET.fromstring(out).iter(NS + "Deleted")):
 if keys_under("obj/many/"):
     lib.fail(f"keys left after deleting everything: {keys_under('obj/many/')}")
 
-status, _, _ = s3.request("DELETE", "/many")
-if status != 204:
-    lib.fail(f"delete the emptied bucket: {status}")
-
 # a repair whose own cells are down when the key is queued
 cluster.repair()
-s3.request("PUT", "/photos")
 blob = os.urandom(12345)
 
 cluster.host(1).stop()

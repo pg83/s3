@@ -91,29 +91,6 @@ func (e *Etcd) scan(prefix, from string, limit int, keysOnly bool) ([]Entry, boo
 	return entries(resp.Kvs), resp.More
 }
 
-func (e *Etcd) scanIn(guard, prefix, from string, limit int, keysOnly bool) ([]Entry, bool, bool) {
-	start, opts, ok := rangeOpts(prefix, from, limit, keysOnly)
-
-	if !ok {
-		_, exists := e.get(guard)
-
-		return nil, false, exists
-	}
-
-	resp := throw2(e.c.Txn(context.Background()).
-		If(clientv3.Compare(clientv3.Version(guard), ">", 0)).
-		Then(clientv3.OpGet(start, opts...)).
-		Commit())
-
-	if !resp.Succeeded {
-		return nil, false, false
-	}
-
-	got := resp.Responses[0].GetResponseRange()
-
-	return entries(got.Kvs), got.More, true
-}
-
 func (e *Etcd) fetch(keys []string) map[string][]byte {
 	out := map[string][]byte{}
 
@@ -137,45 +114,8 @@ func (e *Etcd) fetch(keys []string) map[string][]byte {
 	return out
 }
 
-func (e *Etcd) getIn(guard, key string) (Entry, bool, bool) {
-	resp := throw2(e.c.Txn(context.Background()).
-		If(clientv3.Compare(clientv3.Version(guard), ">", 0)).
-		Then(clientv3.OpGet(key)).
-		Commit())
-
-	if !resp.Succeeded {
-		return Entry{}, false, false
-	}
-
-	got := entries(resp.Responses[0].GetResponseRange().Kvs)
-
-	if len(got) == 0 {
-		return Entry{}, false, true
-	}
-
-	return got[0], true, true
-}
-
-func (e *Etcd) put(key string, value []byte) {
-	throw2(e.c.Put(context.Background(), key, string(value)))
-}
-
-func (e *Etcd) putIn(guard, key string, value []byte) (int64, bool) {
-	resp := throw2(e.c.Txn(context.Background()).
-		If(clientv3.Compare(clientv3.Version(guard), ">", 0)).
-		Then(clientv3.OpPut(key, string(value))).
-		Commit())
-
-	return resp.Header.Revision, resp.Succeeded
-}
-
-func (e *Etcd) putIfAbsent(key string, value []byte) bool {
-	resp := throw2(e.c.Txn(context.Background()).
-		If(clientv3.Compare(clientv3.Version(key), "=", 0)).
-		Then(clientv3.OpPut(key, string(value))).
-		Commit())
-
-	return resp.Succeeded
+func (e *Etcd) put(key string, value []byte) int64 {
+	return throw2(e.c.Put(context.Background(), key, string(value))).Header.Revision
 }
 
 func (e *Etcd) putIfRevision(key string, value []byte, rev int64) bool {
@@ -191,16 +131,7 @@ func (e *Etcd) del(key string) {
 	throw2(e.c.Delete(context.Background(), key))
 }
 
-func (e *Etcd) delIn(guard, key string) bool {
-	resp := throw2(e.c.Txn(context.Background()).
-		If(clientv3.Compare(clientv3.Version(guard), ">", 0)).
-		Then(clientv3.OpDelete(key)).
-		Commit())
-
-	return resp.Succeeded
-}
-
-func (e *Etcd) delAllIn(guard string, keys []string) bool {
+func (e *Etcd) delAll(keys []string) {
 	for i := 0; i < len(keys); i += txnOps {
 		chunk := keys[i:min(i+txnOps, len(keys))]
 		ops := make([]clientv3.Op, 0, len(chunk))
@@ -209,17 +140,8 @@ func (e *Etcd) delAllIn(guard string, keys []string) bool {
 			ops = append(ops, clientv3.OpDelete(k))
 		}
 
-		resp := throw2(e.c.Txn(context.Background()).
-			If(clientv3.Compare(clientv3.Version(guard), ">", 0)).
-			Then(ops...).
-			Commit())
-
-		if !resp.Succeeded {
-			return false
-		}
+		throw2(e.c.Txn(context.Background()).Then(ops...).Commit())
 	}
-
-	return true
 }
 
 func (e *Etcd) watch(prefix string) chan struct{} {

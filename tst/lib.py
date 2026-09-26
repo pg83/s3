@@ -266,16 +266,17 @@ class Host:
 
 
 class Cluster:
-    """Three hosts of cells, one front and, on request, a repair per host."""
+    """Three hosts of cells, one front and, on request, a repair per host;
+    the buckets are the config's."""
 
-    def __init__(self, etcd, hosts, cells, hdd_bytes):
+    def __init__(self, etcd, hosts, cells, hdd_bytes, buckets):
         self.etcd = etcd
         self.hosts = [Host(i, cells, hdd_bytes) for i in range(hosts)]
         self.front_port = free_port()
         self.config = os.path.join(tempfile.mkdtemp(prefix="s3cfg-"), "config.json")
         self.procs = []
 
-        spec = {"etcd": [etcd.endpoint()], "cells": []}
+        spec = {"etcd": [etcd.endpoint()], "buckets": list(buckets), "cells": []}
 
         for h in self.hosts:
             for c in h.cells:

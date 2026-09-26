@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"strings"
 )
 
 type CellSpec struct {
@@ -12,8 +13,9 @@ type CellSpec struct {
 }
 
 type Config struct {
-	Etcd  []string   `json:"etcd"`
-	Cells []CellSpec `json:"cells"`
+	Etcd    []string   `json:"etcd"`
+	Buckets []string   `json:"buckets"`
+	Cells   []CellSpec `json:"cells"`
 }
 
 func loadConfig(path string) *Config {
@@ -27,6 +29,24 @@ func loadConfig(path string) *Config {
 
 	if len(cfg.Etcd) == 0 {
 		throwFmt("config: etcd endpoints are required")
+	}
+
+	if len(cfg.Buckets) == 0 {
+		throwFmt("config: buckets are required")
+	}
+
+	names := map[string]bool{}
+
+	for _, b := range cfg.Buckets {
+		if b == "" || strings.Contains(b, "/") {
+			throwFmt("config: bucket name %q", b)
+		}
+
+		if names[b] {
+			throwFmt("config: bucket %s listed twice", b)
+		}
+
+		names[b] = true
 	}
 
 	seen := map[int]bool{}

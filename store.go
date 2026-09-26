@@ -14,11 +14,10 @@ import (
 )
 
 var (
-	errTooFewCells  = errors.New("store: fewer than two cells took the object")
-	errUnreadable   = errors.New("store: no combination of pieces matches the md5")
-	errNoSuchKey    = errors.New("store: no such key")
-	errClientGone   = errors.New("store: the client left")
-	errNoSuchBucket = errors.New("store: no such bucket")
+	errTooFewCells = errors.New("store: fewer than two cells took the object")
+	errUnreadable  = errors.New("store: no combination of pieces matches the md5")
+	errNoSuchKey   = errors.New("store: no such key")
+	errClientGone  = errors.New("store: the client left")
 )
 
 type Piece struct {
@@ -36,16 +35,25 @@ type Manifest struct {
 }
 
 type Store struct {
-	etcd   *Etcd
-	hosts  []string
-	byHost map[string][]CellSpec
-	byId   map[int]CellSpec
-	links  map[int]*Link
-	up     chan struct{}
+	etcd    *Etcd
+	hosts   []string
+	byHost  map[string][]CellSpec
+	byId    map[int]CellSpec
+	links   map[int]*Link
+	up      chan struct{}
+	buckets []string
+	known   map[string]bool
 }
 
 func newStore(cfg *Config) *Store {
-	s := &Store{etcd: newEtcd(cfg.Etcd), byHost: map[string][]CellSpec{}, byId: map[int]CellSpec{}, links: map[int]*Link{}, up: make(chan struct{}, 1)}
+	s := &Store{etcd: newEtcd(cfg.Etcd), byHost: map[string][]CellSpec{}, byId: map[int]CellSpec{}, links: map[int]*Link{}, up: make(chan struct{}, 1), known: map[string]bool{}}
+
+	for _, b := range cfg.Buckets {
+		s.buckets = append(s.buckets, b)
+		s.known[b] = true
+	}
+
+	sort.Strings(s.buckets)
 
 	for _, c := range cfg.Cells {
 		if _, seen := s.byHost[c.Host]; !seen {
@@ -72,10 +80,6 @@ func objKey(bucket, key string) string {
 
 func repairKey(host, bucket, key string) string {
 	return "repair/" + host + "/" + bucket + "/" + key
-}
-
-func bucketKey(bucket string) string {
-	return "bkt/" + bucket
 }
 
 func pieceLen(size int64) int64 {
@@ -245,9 +249,7 @@ func (s *Store) put(gone <-chan struct{}, bucket, key string, data []byte, conte
 	if len(data) == 0 {
 		m.Md5 = md5hex(data)
 
-		if _, ok := s.etcd.putIn(bucketKey(bucket), objKey(bucket, key), throw2(json.Marshal(m))); !ok {
-			return m, errNoSuchBucket
-		}
+		s.etcd.put(objKey(bucket, key), throw2(json.Marshal(m)))
 
 		return m, nil
 	}
@@ -282,11 +284,7 @@ func (s *Store) put(gone <-chan struct{}, bucket, key string, data []byte, conte
 
 	m.Pieces = p.pieces3()
 
-	rev, ok := s.etcd.putIn(bucketKey(bucket), objKey(bucket, key), throw2(json.Marshal(m)))
-
-	if !ok {
-		return m, errNoSuchBucket
-	}
+	rev := s.etcd.put(objKey(bucket, key), throw2(json.Marshal(m)))
 
 	slog.Debug("store: put", "key", key, "size", m.Size, "hash", hashed.Sub(start), "two", acked.Sub(hashed),
 		"etcd", time.Since(acked), "pending", p.pending)
@@ -327,11 +325,7 @@ func (s *Store) owe(host, bucket, key string) {
 }
 
 func (s *Store) manifest(bucket, key string) (Manifest, int64, error) {
-	entry, found, exists := s.etcd.getIn(bucketKey(bucket), objKey(bucket, key))
-
-	if !exists {
-		return Manifest{}, 0, errNoSuchBucket
-	}
+	entry, found := s.etcd.get(objKey(bucket, key))
 
 	if !found {
 		return Manifest{}, 0, errNoSuchKey
