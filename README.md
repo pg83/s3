@@ -197,13 +197,13 @@ The goroutine owns the connection and the table of messages it has
 taken from its channel and not yet answered. Every message gets
 exactly one outcome: the reply with its id, or a synthetic `link down`.
 A socket that dies produces neither; the goroutine reconnects and
-sends the table again, and only a connect that comes back refused
-means the cell is not there: then everything in the table gets
-`link down` and the senders decide what that means for their
-operation. While the link is down a message arriving on the channel
-prompts a connect right away, so the answer is as fresh as the last
-attempt, never a timer. Nothing is shared, nothing is locked, nothing
-is retried below the operation.
+sends the table again, and a connect that fails, refused or not
+answered within five seconds, means the cell is not there: then
+everything in the table gets `link down` and the senders decide what
+that means for their operation. While the link is down a message
+arriving on the channel prompts a connect right away, so the answer
+is as fresh as the last attempt, never a timer. Nothing is shared,
+nothing is locked, nothing is retried below the operation.
 
 On the cell the connection's reader puts every append straight into
 the writer's queue and blocks when the queue is full, so it stops

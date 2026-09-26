@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"sort"
-	"syscall"
 	"time"
 )
 
@@ -26,6 +25,7 @@ const (
 	codeCancelled = 4
 	frameHead     = 4 + 1 + 8
 	idlePace      = time.Second
+	dialTimeout   = 5 * time.Second
 	keepAlive     = 10 * time.Second
 	inboxDepth    = 16
 )
@@ -244,7 +244,7 @@ func (l *Link) connect() net.Conn {
 	down := false
 
 	for {
-		conn, err := net.Dial("tcp", l.addr)
+		conn, err := net.DialTimeout("tcp", l.addr, dialTimeout)
 
 		if err == nil {
 			if tcp, ok := conn.(*net.TCPConn); ok {
@@ -270,12 +270,10 @@ func (l *Link) connect() net.Conn {
 			down = true
 		}
 
-		if errors.Is(err, syscall.ECONNREFUSED) {
-			for id, m := range l.waiting {
-				m.reply <- outcome{tag: m.tag}
+		for id, m := range l.waiting {
+			m.reply <- outcome{tag: m.tag}
 
-				delete(l.waiting, id)
-			}
+			delete(l.waiting, id)
 		}
 
 		select {
