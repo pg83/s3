@@ -3,6 +3,7 @@ module github.com/pg83/s3
 go 1.25
 
 require (
+	github.com/cespare/xxhash/v2 v2.3.0
 	go.etcd.io/etcd/api/v3 v3.6.8
 	go.etcd.io/etcd/client/v3 v3.6.8
 )

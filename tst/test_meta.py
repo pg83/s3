@@ -236,7 +236,7 @@ deadline = time.time() + 10
 while time.time() < deadline and not etcd.has("repair/h1/photos/outage"):
     time.sleep(0.05)
 m = etcd.manifest("photos", "outage")
-if len(m["pieces"]) != 2 or not etcd.has("repair/h1/photos/outage"):
+if len(lib.pieces(m)) != 2 or not etcd.has("repair/h1/photos/outage"):
     lib.fail(f"degraded put: {m} queued={etcd.has('repair/h1/photos/outage')}")
 
 cluster.host(1).start()
@@ -246,10 +246,10 @@ while time.time() < deadline and etcd.has("repair/h1/photos/outage"):
     time.sleep(0.05)
 
 m3 = etcd.manifest("photos", "outage")
-if etcd.has("repair/h1/photos/outage") or len(m3["pieces"]) != 3:
+if etcd.has("repair/h1/photos/outage") or len(lib.pieces(m3)) != 3:
     lib.fail(f"repair after its cells came back: {m3} queued={etcd.has('repair/h1/photos/outage')}")
 
-added = [p for p in m3["pieces"] if p not in m["pieces"]]
+added = [p for p in lib.pieces(m3) if p not in lib.pieces(m)]
 if len(added) != 1 or cluster.host_of(added[0]["cell"]) != 1:
     lib.fail(f"the third piece did not land on the host that owed it: {added}")
 

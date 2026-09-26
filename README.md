@@ -50,72 +50,92 @@ Nine cells, three per host, numbered 0 to 8.
 
 ## Objects
 
-An object is split in half: `d0` is the first half, `d1` the second
-(padded to the same length), `p` is their XOR. For two data pieces and
-one parity piece Reed-Solomon is XOR, so that is all the arithmetic. Any
-two pieces rebuild the object. Overhead is 1.5x and one host may be
-lost.
+An object is cut into chunks of 8 MiB; the last one is shorter, and
+an object up to 8 MiB is one chunk. Each chunk is split in half: `d0`
+is the first half, `d1` the second (padded to the same length), `p`
+is their XOR. For two data pieces and one parity piece Reed-Solomon
+is XOR, so that is all the arithmetic. Any two pieces rebuild the
+chunk. Overhead is 1.5x and one host may be lost.
 
-The three pieces go to three cells on three different hosts. The id of
-an object records where each piece went:
+The three pieces of a chunk go to three cells on three different
+hosts, the order of hosts drawn from the key and the chunk's number,
+so a big object spreads over every cell. The manifest of an object
+records where each piece went and its xxh64:
 
 ```
-id = [(cell, offset, piece)...], len        piece: 0 = d0, 1 = d1, 2 = p
+{"size", "md5", "mtime", "type", "chunk": 8388608,
+ "chunks": [{"pieces": [{"piece", "cell", "offset", "xxh"}, ...]}, ...]}
 ```
 
-The id carries the placement, so nothing else has to: a cell knows
-nothing about objects, and no table maps ids to disks.
+`piece` is 0 for `d0`, 1 for `d1`, 2 for `p`. The manifest carries the
+placement, so nothing else has to: a cell knows nothing about objects,
+and no table maps keys to disks. The md5 is the object's and is its
+ETag; the xxh64 is each piece's own, so a bad piece is known by itself
+and never by elimination.
+
+Records written before chunks have their pieces at the top and no
+xxh64; a reader turns one into a single chunk the size of the object
+and takes the same path, checking the assembled chunk against the md5
+because that is the only hash it has. The first repair that touches
+such a record writes it back in the new shape, hashes and all.
 
 ## Write
 
 The front reads the whole body into memory, a bounded number of bodies
 at a time so that clients past that wait in their own sockets,
-sends the two halves to their hosts the moment it has them, then the
-parity, and computes the md5 for the key while the cells think, so
-neither the hash nor the XOR sits in front of the sends. Each piece
-goes into a cell of its host picked at random; a cell that is full
-sends the piece to the next cell of the same host, a host whose cell is
-down is left owing the piece. Nothing is retried: the outcome of every append
-is known, and the client above retries the whole request if too little
-of it landed.
+sends every chunk's two halves and parity the moment it has them, all
+chunks at once, and computes the md5 for the key while the cells
+think, so neither the hash nor the XOR sits in front of the sends.
+Each piece goes into a cell of its host picked at random; a cell that
+is full sends the piece to the next cell of the same host, a host
+whose cell is down is left owing the piece. Nothing is retried: the
+outcome of every append is known, and the client above retries the
+whole request if too little of it landed.
 
-Two appends landed: write the key with those two sources and answer
-the client; it does not wait for the third. The third is waited for
-after the answer: landed, the key is written again with three sources
-under a compare-and-swap on the revision the answer was given at;
-failed, a `repair/<host>/` entry is left for the host that took
-nothing. Fewer than two: fail; nothing is rolled back, the orphan
-pieces are garbage in their cells.
+Every chunk on two appends: write the key with those sources and
+answer the client; it does not wait for the thirds. The thirds are
+waited for after the answer: the key is written again once with all
+that landed, under a compare-and-swap on the revision the answer was
+given at, and a `repair/<host>/` entry is left for every host that
+took less than its share. A chunk on fewer than two: fail; nothing is
+rolled back, the orphan pieces are garbage in their cells.
 
 The key in etcd is written only after the pieces are durable, so a
 reader never sees a pointer to bytes that are not there.
 
 ## Read
 
-Fetch `d0` and `d1` at once, assemble, check the md5 kept in the key.
-On mismatch or a half missing fetch `p` as well and try the remaining
-combinations; the piece the winning combination left out is the
-corrupt one, and the key goes to the repair queue of the host holding
-it. A piece whose cell is down is simply absent for this read. No
-combination matches: the read fails and the client decides.
+A read touches only the chunks its range covers: it fetches their
+`d0` and `d1` at once and checks each piece against its xxh64. A
+piece missing or failing its hash: fetch `p` for that chunk as well
+and rebuild the piece from the two that hold; the rebuilt one is
+checked against its own hash too. Every piece found corrupt sends the
+key to the repair queue of the host holding it. A piece whose cell is
+down is simply absent for this read. A chunk with no two sound pieces:
+the read fails and the client decides.
 
-Range requests assemble the whole object and return the slice.
+Range requests cost the chunks they touch, not the object.
 
 ## Repair
 
 Every host runs `s3 repair -host <name>` over its own queue,
-`repair/<name>/`: an entry there means this host owes a piece of that
+`repair/<name>/`: an entry there means this host owes pieces of that
 key, either because it took nothing at write time or because a read
-found its piece corrupt. The handler reads what the key has, all
-pieces at once, over the network for the other hosts'; if all three are
-there and agree
-with the md5 and with each other the entry is stale and is dropped.
-Otherwise it rebuilds its own piece from the other two, appends it to
-one of its own cells, which it reaches over loopback only and refuses
-to run otherwise, rewrites the key under a compare-and-swap on the etcd
-revision and drops the entry. A key that was overwritten or deleted
-meanwhile is skipped. A host that stays down keeps its queue, and its
-keys at two sources, until it returns; nobody repairs on its behalf.
+found a piece of its corrupt. One key may sit in the queues of several
+hosts at once, each owing pieces of different chunks, and each repair
+mends only its own: for every chunk it knows which piece is its, the
+one on its cells or, when none is, the one the host order assigns it.
+It reads all pieces of the chunks that concern it at once, over the
+network for the other hosts', and where its piece is sound by its
+hash there is nothing to do; otherwise it rebuilds the piece from the
+two that hold, appends it to one of its own cells, which it reaches
+over loopback only and refuses to run otherwise, and rewrites the key
+once under a compare-and-swap on the etcd revision it read. When the
+swap fails because another host's repair got there first, it reads
+the key again and repeats its part; when nothing was left to mend it
+drops the entry. A key that was overwritten or deleted meanwhile is
+skipped. A host that stays down keeps its queue, and its keys short of
+its pieces, until it returns; nobody repairs on its behalf.
 
 The handler does not poll. It watches its prefix in etcd and walks the
 queue when the watch opens and on every change under it; a fix that
@@ -126,8 +146,8 @@ moment such a fix can succeed.
 ## Metadata
 
 ```
-obj/<bucket>/<key>      -> id, size, md5 (the ETag), mtime
-repair/<host>/<bucket>/<key>   -> this host owes a piece
+obj/<bucket>/<key>      -> manifest: size, md5 (the ETag), mtime, chunks
+repair/<host>/<bucket>/<key>   -> this host owes pieces
 ```
 
 The buckets are the config's, a static list every front, repair and
@@ -243,7 +263,7 @@ Config is JSON:
 No compaction: a full cell is emptied and refilled. No scrub. No
 rebuild walk over etcd for a lost cell. No limits on object size or
 concurrent uploads. No range reads served without assembling the whole
-object. No multipart uploads, no server-side copy, no signatures
+object once it is read. No multipart uploads, no server-side copy, no signatures
 checked, no CORS, no bucket policies, ACLs or versioning, no buckets
 made over the API.
 

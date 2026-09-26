@@ -243,6 +243,9 @@ class Etcd:
     def has(self, key):
         return self.get(key) is not None
 
+    def put(self, key, value):
+        self.call("put", {"key": base64.b64encode(key.encode()).decode(), "value": base64.b64encode(value).decode()})
+
     def manifest(self, bucket, key):
         raw = self.get(f"obj/{bucket}/{key}")
 
@@ -250,6 +253,15 @@ class Etcd:
             fail(f"no manifest for {bucket}/{key}")
 
         return json.loads(raw)
+
+
+def pieces(m):
+    """Every placed piece of a manifest, chunked or not."""
+
+    if "chunks" in m:
+        return [p for c in m["chunks"] for p in c["pieces"]]
+
+    return m.get("pieces") or []
 
 
 class Host:

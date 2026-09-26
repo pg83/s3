@@ -417,11 +417,20 @@ func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key str
 			return
 		}
 
+		start, end, partial, ok := byteRange(r.Header.Get("Range"), m.Size)
+
+		if !ok {
+			h.Set("Content-Range", "bytes */"+strconv.FormatInt(m.Size, 10))
+			s3Fail(w, http.StatusRequestedRangeNotSatisfiable, "InvalidRange", "range not satisfiable", resource)
+
+			return
+		}
+
 		f.slots <- struct{}{}
 
 		defer func() { <-f.slots }()
 
-		data, err := f.store.get(r.Context().Done(), bucket, key, m)
+		data, err := f.store.get(r.Context().Done(), bucket, key, m, start, end)
 
 		if errors.Is(err, errClientGone) {
 			return
@@ -434,16 +443,6 @@ func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key str
 		}
 
 		throw(err)
-
-		start, end, partial, ok := byteRange(r.Header.Get("Range"), m.Size)
-
-		if !ok {
-			h.Set("Content-Range", "bytes */"+strconv.FormatInt(m.Size, 10))
-			s3Fail(w, http.StatusRequestedRangeNotSatisfiable, "InvalidRange", "range not satisfiable", resource)
-
-			return
-		}
-
 		h.Set("Content-Length", strconv.FormatInt(end-start, 10))
 
 		if partial {
@@ -453,7 +452,7 @@ func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key str
 			w.WriteHeader(http.StatusOK)
 		}
 
-		w.Write(data[start:end])
+		w.Write(data)
 	case http.MethodDelete:
 		f.store.etcd.del(objKey(bucket, key))
 		w.WriteHeader(http.StatusNoContent)

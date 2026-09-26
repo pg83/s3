@@ -6,7 +6,6 @@ import (
 	"errors"
 	"log/slog"
 	"net"
-	"sort"
 	"strings"
 )
 
@@ -85,109 +84,135 @@ func (r *Repairer) pass(prefix string) {
 }
 
 func (r *Repairer) fix(bucket, key string) {
-	m, rev, err := r.store.manifest(bucket, key)
+	for {
+		m, rev, err := r.store.manifest(bucket, key)
 
-	if errors.Is(err, errNoSuchKey) || (err == nil && m.Size == 0) {
-		r.drop(bucket, key)
+		if errors.Is(err, errNoSuchKey) || (err == nil && m.Size == 0) {
+			r.drop(bucket, key)
 
-		return
-	}
-
-	throw(err)
-
-	mine := r.pieceOf(bucket, key, m)
-	have, _ := r.store.fetchAll(nil, m.Pieces, pieceLen(m.Size))
-
-	if sound(have, m) {
-		r.drop(bucket, key)
-
-		return
-	}
-
-	have[mine] = rebuild(mine, have)
-
-	if have[mine] == nil {
-		throwFmt("repair: %s/%s: the other two pieces are not both readable", bucket, key)
-	}
-
-	if !sound(have, m) {
-		throwFmt("repair: %s/%s: the other two pieces do not rebuild the md5", bucket, key)
-	}
-
-	pl := r.store.placer(map[int][]byte{mine: have[mine]}, map[int]string{mine: r.host})
-
-	pl.wait(nil, 1)
-
-	p, ok := pl.placed[mine]
-
-	if !ok {
-		throwFmt("repair: %s/%s: no cell of %s took the piece", bucket, key, r.host)
-	}
-
-	pieces := []Piece{p}
-
-	for _, old := range m.Pieces {
-		if old.Piece != mine {
-			pieces = append(pieces, old)
+			return
 		}
+
+		throw(err)
+
+		chunks := make([]*chunkState, len(m.Chunks))
+		mine := make([]int, len(m.Chunks))
+
+		var reqs []readReq
+
+		for i := range m.Chunks {
+			chunks[i] = m.chunk(i)
+			mine[i] = r.pieceOf(key, i, chunks[i].by)
+
+			if mine[i] >= 0 {
+				reqs = append(reqs, chunks[i].reads(i, 0, 1, 2)...)
+			}
+		}
+
+		have, _ := r.store.fetch(nil, reqs)
+
+		for i, c := range chunks {
+			c.have = [3][]byte{have[i*3], have[i*3+1], have[i*3+2]}
+		}
+
+		changed := false
+
+		for i, c := range chunks {
+			if mine[i] >= 0 && r.mend(bucket, key, c, mine[i], &m.Chunks[i]) {
+				changed = true
+			}
+		}
+
+		if !changed {
+			r.drop(bucket, key)
+
+			return
+		}
+
+		if r.store.etcd.putIfRevision(objKey(bucket, key), throw2(json.Marshal(m)), rev) {
+			r.drop(bucket, key)
+			slog.Info("repair: mended", "bucket", bucket, "key", key, "chunks", len(m.Chunks))
+
+			return
+		}
+
+		slog.Info("repair: key changed underneath, again", "bucket", bucket, "key", key)
 	}
-
-	sort.Slice(pieces, func(i, j int) bool { return pieces[i].Piece < pieces[j].Piece })
-	m.Pieces = pieces
-
-	if !r.store.etcd.putIfRevision(objKey(bucket, key), throw2(json.Marshal(m)), rev) {
-		slog.Warn("repair: key changed underneath, left in the queue", "bucket", bucket, "key", key)
-
-		return
-	}
-
-	r.drop(bucket, key)
-	slog.Info("repair: rebuilt", "bucket", bucket, "key", key, "piece", mine, "cell", p.Cell)
 }
 
-func (r *Repairer) pieceOf(bucket, key string, m Manifest) int {
-	present := [3]bool{}
-	mine := -1
-
-	for _, p := range m.Pieces {
-		present[p.Piece] = true
-
-		if r.store.byId[p.Cell].Host == r.host {
-			mine = p.Piece
-		}
+func (r *Repairer) mend(bucket, key string, c *chunkState, mine int, chunk *Chunk) bool {
+	if c.sealed() && c.sound(mine) {
+		return false
 	}
+
+	data, _ := c.assemble()
+
+	if data == nil {
+		throwFmt("repair: %s/%s: the other pieces of a chunk do not agree", bucket, key)
+	}
+
+	pieces := c.pieces(data)
+	changed := false
 
 	for i := range 3 {
-		if mine < 0 && !present[i] {
-			mine = i
+		if p, ok := c.by[i]; ok && p.Xxh == "" && i != mine {
+			p.Xxh = xxhHex(pieces[i])
+			c.by[i] = p
+			changed = true
 		}
 	}
 
-	if mine < 0 {
-		throwFmt("repair: %s/%s: no piece of it belongs to %s", bucket, key, r.host)
+	if !bytes.Equal(c.have[mine], pieces[mine]) {
+		pl := r.store.newPlacer(map[int]string{mine: r.host})
+
+		pl.add(mine, pieces[mine])
+		pl.wait(nil, 1)
+
+		p, ok := pl.placed[mine]
+
+		if !ok {
+			throwFmt("repair: %s/%s: no cell of %s took the piece", bucket, key, r.host)
+		}
+
+		c.by[mine] = p
+		changed = true
+	} else if p := c.by[mine]; p.Xxh == "" {
+		p.Xxh = xxhHex(pieces[mine])
+		c.by[mine] = p
+		changed = true
 	}
 
-	return mine
+	if changed {
+		chunk.Pieces = nil
+
+		for i := range 3 {
+			if p, ok := c.by[i]; ok {
+				chunk.Pieces = append(chunk.Pieces, p)
+			}
+		}
+	}
+
+	return changed
+}
+
+func (r *Repairer) pieceOf(key string, i int, by map[int]Piece) int {
+	for idx, p := range by {
+		if r.store.byId[p.Cell].Host == r.host {
+			return idx
+		}
+	}
+
+	hosts := r.store.chunkHosts(key, i)
+
+	for idx := range 3 {
+		if _, ok := by[idx]; !ok && hosts[idx] == r.host {
+			return idx
+		}
+	}
+
+	return -1
 }
 
 func (r *Repairer) drop(bucket, key string) {
 	r.store.etcd.del(repairKey(r.host, bucket, key))
-}
-
-func sound(have [3][]byte, m Manifest) bool {
-	if have[0] == nil || have[1] == nil || have[2] == nil {
-		return false
-	}
-
-	return md5hex(assemble(have[0], have[1], m.Size)) == m.Md5 && bytes.Equal(xor(have[0], have[1]), have[2])
-}
-
-func rebuild(piece int, have [3][]byte) []byte {
-	a, b := (piece+1)%3, (piece+2)%3
-
-	if have[a] == nil || have[b] == nil {
-		return nil
-	}
-
-	return xor(have[a], have[b])
 }

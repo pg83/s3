@@ -129,11 +129,11 @@ td.number.short{color:var(--warn)}
     <tbody id="rows">
     {{range .Entries}}
       <tr class="{{if .Dir}}dir{{else}}file{{end}}" data-entry>
-        <td><div class="entry"><span class="dot{{if not .Dir}} file{{if lt .Pieces 3}} short{{else}} full{{end}}{{end}}" title="{{if .Dir}}Folder{{else if lt .Pieces 3}}{{.Pieces}} of 3 pieces{{else}}3 pieces{{end}}"></span><div class="entry-body"><a class="entry-link" href="{{.URL}}"><div class="entry-name">{{.Name}}</div></a></div></div></td>
+        <td><div class="entry"><span class="dot{{if not .Dir}} file{{if lt .Pieces .Total}} short{{else}} full{{end}}{{end}}" title="{{if .Dir}}Folder{{else if lt .Pieces .Total}}{{.Pieces}} of {{.Total}} pieces{{else}}{{.Total}} pieces{{end}}"></span><div class="entry-body"><a class="entry-link" href="{{.URL}}"><div class="entry-name">{{.Name}}</div></a></div></div></td>
         {{if .Dir}}<td class="number"><span class="dash">—</span></td><td class="number"><span class="dash">—</span></td><td><span class="dash">—</span></td><td class="number"><span class="dash">—</span></td>{{else}}<td class="number" title="{{.Size}} bytes">{{size .Size}}</td>
         <td class="number"><time class="clock" datetime="{{.Mtime}}" title="{{.Mtime}}">{{stamp .Mtime}}</time></td>
         <td class="md5" title="{{.Md5}}">{{.Md5}}</td>
-        <td class="number{{if lt .Pieces 3}} short{{end}}">{{.Pieces}}</td>{{end}}
+        <td class="number{{if lt .Pieces .Total}} short{{end}}">{{.Pieces}}{{if gt .Total 3}}/{{.Total}}{{end}}</td>{{end}}
       </tr>
     {{end}}
       <tr id="empty-row"{{if .Entries}} hidden{{end}}><td colspan="5" class="empty">{{if .Prefix}}folder is empty{{else}}bucket is empty{{end}}</td></tr>
@@ -204,6 +204,7 @@ type WebEntry struct {
 	Mtime  string
 	Md5    string
 	Pieces int
+	Total  int
 }
 
 type WebPage struct {
@@ -294,7 +295,8 @@ func (wb *Web) bucket(r *http.Request, page *WebPage) {
 			Size:   o.Size,
 			Mtime:  o.Mtime.UTC().Format(time.RFC3339),
 			Md5:    o.Md5,
-			Pieces: len(o.Pieces),
+			Pieces: o.placed(),
+			Total:  3 * len(o.Chunks),
 		})
 	}
 
@@ -319,7 +321,7 @@ func (wb *Web) object(w http.ResponseWriter, r *http.Request) {
 
 		throw(err)
 
-		data, err := wb.store.get(r.Context().Done(), bucket, key, m)
+		data, err := wb.store.get(r.Context().Done(), bucket, key, m, 0, m.Size)
 
 		if errors.Is(err, errClientGone) {
 			return
