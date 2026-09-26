@@ -254,6 +254,7 @@ func (s *Store) put(gone <-chan struct{}, bucket, key string, data []byte, conte
 		hosts[i] = host
 	}
 
+	start := time.Now()
 	p := s.newPlacer(hosts)
 	d0, d1 := halves(data)
 
@@ -263,6 +264,8 @@ func (s *Store) put(gone <-chan struct{}, bucket, key string, data []byte, conte
 
 	m.Md5 = md5hex(data)
 
+	hashed := time.Now()
+
 	if !p.wait(gone, 2) {
 		return m, errClientGone
 	}
@@ -271,9 +274,14 @@ func (s *Store) put(gone <-chan struct{}, bucket, key string, data []byte, conte
 		return m, errTooFewCells
 	}
 
+	acked := time.Now()
+
 	m.Pieces = p.pieces3()
 
 	rev := s.etcd.putRev(objKey(bucket, key), throw2(json.Marshal(m)))
+
+	slog.Debug("store: put", "key", key, "size", m.Size, "hash", hashed.Sub(start), "two", acked.Sub(hashed),
+		"etcd", time.Since(acked), "pending", p.pending)
 
 	if p.pending > 0 {
 		go s.settle(p, bucket, key, m, rev)
@@ -390,16 +398,20 @@ func (s *Store) get(gone <-chan struct{}, bucket, key string, m Manifest) ([]byt
 		}
 	}
 
+	start := time.Now()
 	have, stayed := s.fetchAll(gone, halves, n)
 
 	if !stayed {
 		return nil, errClientGone
 	}
 
+	fetched := time.Now()
 	both := have[0] != nil && have[1] != nil
 
 	if both {
 		if data := assemble(have[0], have[1], m.Size); md5hex(data) == m.Md5 {
+			slog.Debug("store: get", "key", key, "size", m.Size, "fetch", fetched.Sub(start), "assemble", time.Since(fetched))
+
 			return data, nil
 		}
 	}

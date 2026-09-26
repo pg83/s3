@@ -6,8 +6,24 @@ import (
 	"os"
 )
 
+var logLevel = new(slog.LevelVar)
+
+func flags(name string) (*flag.FlagSet, *bool) {
+	fs := flag.NewFlagSet(name, flag.ExitOnError)
+
+	return fs, fs.Bool("debug", false, "log the timing of every tick, flush, put and get")
+}
+
+func parse(fs *flag.FlagSet, debug *bool) {
+	throw(fs.Parse(os.Args[2:]))
+
+	if *debug {
+		logLevel.Set(slog.LevelDebug)
+	}
+}
+
 func main() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel})))
 
 	if len(os.Args) < 2 {
 		printUsage()
@@ -17,34 +33,34 @@ func main() {
 	try(func() {
 		switch os.Args[1] {
 		case "cell":
-			fs := flag.NewFlagSet("cell", flag.ExitOnError)
+			fs, debug := flags("cell")
 			listen := fs.String("listen", "", "address to serve cell requests on")
 			load := fs.String("load", "", "directory on the SSD for blocks being read")
 			store := fs.String("store", "", "directory on the SSD for blocks being written")
 			hdd := fs.String("hdd", "", "raw block device for the log")
 
-			throw(fs.Parse(os.Args[2:]))
+			parse(fs, debug)
 			runCell(*listen, *load, *store, *hdd)
 		case "front":
-			fs := flag.NewFlagSet("front", flag.ExitOnError)
+			fs, debug := flags("front")
 			config := fs.String("c", "", "config file")
 			listen := fs.String("listen", "", "address to serve S3 on")
 
-			throw(fs.Parse(os.Args[2:]))
+			parse(fs, debug)
 			runFront(loadConfig(*config), *listen)
 		case "repair":
-			fs := flag.NewFlagSet("repair", flag.ExitOnError)
+			fs, debug := flags("repair")
 			config := fs.String("c", "", "config file")
 			host := fs.String("host", "", "name of this host in the config")
 
-			throw(fs.Parse(os.Args[2:]))
+			parse(fs, debug)
 			runRepair(loadConfig(*config), *host)
 		case "web":
-			fs := flag.NewFlagSet("web", flag.ExitOnError)
+			fs, debug := flags("web")
 			config := fs.String("c", "", "config file")
 			listen := fs.String("listen", "", "address to serve the browser on")
 
-			throw(fs.Parse(os.Args[2:]))
+			parse(fs, debug)
 			runWeb(loadConfig(*config), *listen)
 		default:
 			printUsage()

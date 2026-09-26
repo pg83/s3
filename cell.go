@@ -64,6 +64,7 @@ type Cell struct {
 	reads    chan ReadReq
 	ready    chan struct{}
 	freed    chan struct{}
+	rolls    int
 	num      int64
 	current  *os.File
 	size     int64
@@ -195,6 +196,8 @@ func syncDir(path string) {
 }
 
 func (c *Cell) roll() {
+	c.rolls++
+
 	throw(c.current.Sync())
 	throw(c.current.Close())
 	throw(os.Rename(c.currentPath(c.num), c.readyPath(c.num)))
@@ -246,6 +249,10 @@ func (c *Cell) writer() {
 		}
 
 		replies := make([]reply, len(batch))
+		start := time.Now()
+		bytes := 0
+
+		c.rolls = 0
 
 		for i, req := range batch {
 			switch {
@@ -256,15 +263,23 @@ func (c *Cell) writer() {
 			default:
 				offset, err := c.put(req.data)
 
+				bytes += len(req.data)
 				replies[i] = c.appendReply(req.id, offset, err)
 			}
 		}
 
+		written := time.Now()
+
 		throw(c.current.Sync())
+
+		synced := time.Now()
 
 		for i, req := range batch {
 			req.out <- replies[i]
 		}
+
+		slog.Debug("cell: tick", "batch", len(batch), "bytes", bytes, "rolls", c.rolls,
+			"write", written.Sub(start), "sync", synced.Sub(written), "total", time.Since(start))
 	}
 }
 
@@ -332,14 +347,29 @@ func (c *Cell) flusher() {
 }
 
 func (c *Cell) flush(buf []byte) {
-	for _, num := range blockNumbers(c.store, "") {
+	full := blockNumbers(c.store, "")
+
+	for i, num := range full {
+		start := time.Now()
 		f := throw2(os.Open(c.readyPath(num)))
 
 		throw2(io.ReadFull(f, buf))
 		throw(f.Close())
+
+		read := time.Now()
+
 		throw2(c.hdd.WriteAt(buf, num*blockSize))
+
+		wrote := time.Now()
+
 		throw(c.hdd.Sync())
+
+		synced := time.Now()
+
 		throw(os.Remove(c.readyPath(num)))
+
+		slog.Debug("cell: flushed", "block", num, "waiting", len(full)-i-1,
+			"read", read.Sub(start), "write", wrote.Sub(read), "sync", synced.Sub(wrote))
 
 		select {
 		case c.freed <- struct{}{}:
@@ -455,7 +485,11 @@ func (c *Cell) open(l *loaded, buf []byte, num int64) *os.File {
 		return f
 	}
 
+	start := time.Now()
+
 	throw2(c.hdd.ReadAt(buf, num*blockSize))
+
+	slog.Debug("cell: load", "block", num, "read", time.Since(start))
 
 	tmp := c.loadPath(num) + ".tmp"
 

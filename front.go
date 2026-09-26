@@ -399,7 +399,11 @@ func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key str
 
 		defer func() { <-f.slots }()
 
+		start := time.Now()
 		data := readBody(r)
+
+		slog.Debug("front: body", "key", key, "size", len(data), "read", time.Since(start))
+
 		m, err := f.store.put(r.Context().Done(), bucket, key, data, r.Header.Get("Content-Type"))
 
 		if errors.Is(err, errClientGone) {
