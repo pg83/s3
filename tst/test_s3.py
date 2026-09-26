@@ -128,6 +128,26 @@ status, _, body = s3.request("GET", "/burst/still-here")
 if status != 200 or body != b"here":
     lib.fail(f"get after a client walked away: {status}")
 
+# a client that leaves once its body is in: the put is cancelled at the cells and nothing is written for it
+left = None
+for i in range(20):
+    key = f"left{i}"
+    body = os.urandom(200000)
+    gone = socket.create_connection(("127.0.0.1", cluster.front_port))
+    gone.sendall(f"PUT /burst/{key} HTTP/1.1\r\nHost: x\r\nContent-Length: {len(body)}\r\n\r\n".encode() + body)
+    gone.close()
+    time.sleep(0.2)
+    if not etcd.has(f"obj/burst/{key}"):
+        left = key
+        break
+if left is None:
+    lib.fail("twenty clients left with their body in, and every put still wrote its key")
+if f"key={left}" not in cluster.front.log():
+    lib.fail(f"the front never read the body of {left}")
+status, _, body = s3.request("GET", "/burst/still-here")
+if status != 200 or body != b"here":
+    lib.fail(f"get after a client left mid-put: {status}")
+
 # listing
 def listing(query):
     status, _, body = s3.request("GET", "/photos?" + query)

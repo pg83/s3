@@ -90,7 +90,10 @@ def free_port():
         return s.getsockname()[1]
 
 
-def wait_port(port, timeout=10):
+def wait_port(port, timeout=10, proc=None):
+    """Until something listens on the port; a process that died before it
+    did is reported with its log, not with a timeout."""
+
     deadline = time.time() + timeout
 
     while time.time() < deadline:
@@ -100,7 +103,10 @@ def wait_port(port, timeout=10):
         except OSError:
             time.sleep(0.05)
 
-    fail(f"port {port} never opened")
+        if proc is not None and proc.proc.poll() is not None:
+            fail(f"{proc.name} exited with {proc.proc.returncode} before opening port {port}:\n{proc.text()[-2000:]}")
+
+    fail(f"port {port} never opened" + ("" if proc is None else f":\n{proc.text()[-2000:]}"))
 
 
 def ready_blocks(store):
@@ -173,11 +179,11 @@ class Cell:
 
     def start(self, wait=True):
         listen = [arg for port in self.ports for arg in ("-listen", f"127.0.0.1:{port}")]
-        self.proc = Proc("cell", ["cell", *listen, "-load", self.load, "-store", self.store, "-hdd", self.hdd], self.env).start()
+        self.proc = Proc("cell", ["cell", "-debug", *listen, "-load", self.load, "-store", self.store, "-hdd", self.hdd], self.env).start()
 
         if wait:
             for port in self.ports:
-                wait_port(port)
+                wait_port(port, proc=self.proc)
 
         return self
 
@@ -346,6 +352,9 @@ class Etcd:
     def put(self, key, value):
         self.call("put", {"key": base64.b64encode(key.encode()).decode(), "value": base64.b64encode(value).decode()})
 
+    def delete(self, key):
+        self.call("deleterange", {"key": base64.b64encode(key.encode()).decode()})
+
     def manifest(self, bucket, key):
         raw = self.get(f"obj/{bucket}/{key}")
 
@@ -392,10 +401,10 @@ class Front:
 
     def start(self):
         listen = [arg for port in self.ports for arg in ("-listen", f"127.0.0.1:{port}")]
-        self.proc = Proc("front", ["front", "-c", self.config, *listen], self.env).start()
+        self.proc = Proc("front", ["front", "-debug", "-c", self.config, *listen], self.env).start()
 
         for port in self.ports:
-            wait_port(port)
+            wait_port(port, proc=self.proc)
 
         return self
 
@@ -442,13 +451,14 @@ class Cluster:
 
     def repair(self, env=None):
         for h in self.hosts:
-            Proc(f"repair-h{h.index}", ["repair", "-c", self.config, "-host", f"h{h.index}"], env).start()
+            Proc(f"repair-h{h.index}", ["repair", "-debug", "-c", self.config, "-host", f"h{h.index}"], env).start()
 
     def web(self, env=None):
         port = free_port()
 
-        Proc("web", ["web", "-c", self.config, "-listen", f"127.0.0.1:{port}"], env).start()
-        wait_port(port)
+        web = Proc("web", ["web", "-debug", "-c", self.config, "-listen", f"127.0.0.1:{port}"], env).start()
+
+        wait_port(port, proc=web)
 
         return S3(port)
 

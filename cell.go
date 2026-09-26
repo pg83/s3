@@ -338,11 +338,7 @@ func (c *Cell) put(data []byte) (int64, error) {
 
 func alignedBlock() []byte {
 	raw := make([]byte, blockSize+ioAlign)
-	skew := int(uintptr(unsafe.Pointer(&raw[0])) % ioAlign)
-
-	if skew != 0 {
-		skew = ioAlign - skew
-	}
+	skew := (ioAlign - int(uintptr(unsafe.Pointer(&raw[0]))%ioAlign)) % ioAlign
 
 	return raw[skew : skew+blockSize]
 }

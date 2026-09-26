@@ -211,7 +211,7 @@ jobs:
           set -o pipefail
           python3 dev/merge_coverage.py \
             --output "$RUNNER_TEMP/coverage.out" \
-            --minimum 88 \
+            --minimum 97 \
             "$RUNNER_TEMP"/profiles/s3-coverage-go-*/coverage*.out | tee "$RUNNER_TEMP/summary.txt"
           {
             echo "## Coverage"

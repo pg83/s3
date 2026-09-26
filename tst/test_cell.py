@@ -5,6 +5,7 @@ once the disk is full, and is the same cell on every address it
 listens on."""
 
 import os
+import socket
 import struct
 import time
 
@@ -168,5 +169,110 @@ rc = full.wait_exit()
 
 if rc == 0 or "full" not in full.log():
     lib.fail(f"a full cell must exit without serving, rc={rc}")
+
+# frames the cell refuses: a length of nothing, a body without an id, a read without its arguments, an op nobody knows
+cell = lib.Cell(hdd_bytes=8 * MB).start()
+
+for bad in (struct.pack(">I", 0), struct.pack(">IB", 1, lib.OP_STATUS)):
+    s = socket.create_connection(("127.0.0.1", cell.port))
+    s.sendall(bad)
+
+    if s.recv(1) != b"":
+        lib.fail(f"the cell kept a connection after {bad!r}")
+
+    s.close()
+
+c = cell.client()
+
+if c.call(lib.OP_READ, b"\x00") != (lib.OP_FAIL, lib.CODE_IO):
+    lib.fail("a read without its arguments was not refused")
+
+if c.call(9) != (lib.OP_FAIL, lib.CODE_IO):
+    lib.fail("an unknown op was not refused")
+
+if c.read(8 * MB, 1) is not None:
+    lib.fail("a read past the capacity was not refused")
+
+# a cancel that names nothing is dropped and the connection goes on
+c.send(lib.OP_CANCEL, b"")
+
+if c.status()[0] != 0:
+    lib.fail("a cancel that names nothing changed the head")
+
+c.close()
+cell.stop()
+
+# a store found at start: two full blocks the flusher did not get to, the current block, a stray file, a copy half made
+prepared = lib.Cell(hdd_bytes=16 * MB)
+block0 = os.urandom(BLOCK)
+block1 = os.urandom(BLOCK)
+tail = os.urandom(1000)
+os.makedirs(prepared.store)
+os.makedirs(prepared.load)
+
+for name, content in (("0", block0), ("1", block1), ("2.current", tail), ("junk", b"?")):
+    with open(os.path.join(prepared.store, name), "wb") as f:
+        f.write(content)
+
+with open(os.path.join(prepared.load, "7.tmp"), "wb") as f:
+    f.write(b"?")
+
+prepared.start()
+c = prepared.client()
+
+if c.status()[0] != 2 * BLOCK + len(tail):
+    lib.fail(f"head {c.status()[0]} over a prepared store, expected {2 * BLOCK + len(tail)}")
+
+if c.read(BLOCK - 10, 20) != block0[-10:] + block1[:10] or c.read(2 * BLOCK - 10, 20) != block1[-10:] + tail[:10]:
+    lib.fail("read across the prepared blocks differs")
+
+deadline = time.time() + 10
+
+while time.time() < deadline and lib.ready_blocks(prepared.store):
+    time.sleep(0.1)
+
+if lib.ready_blocks(prepared.store):
+    lib.fail("the full block found at start was never flushed")
+
+if os.path.exists(os.path.join(prepared.load, "7.tmp")):
+    lib.fail("the half made copy survived the start")
+
+with open(prepared.hdd, "rb") as f:
+    if f.read(2 * BLOCK) != block0 + block1:
+        lib.fail("the HDD does not hold the blocks found at start")
+
+c.close()
+prepared.stop()
+
+# a current block that is exactly full at start is rolled before anything else
+rolled = lib.Cell(hdd_bytes=16 * MB)
+os.makedirs(rolled.store)
+
+with open(os.path.join(rolled.store, "0.current"), "wb") as f:
+    f.write(block0)
+
+rolled.start()
+c = rolled.client()
+
+if c.status()[0] != BLOCK or c.append(b"next") != BLOCK:
+    lib.fail("a full current block was not rolled at start")
+
+if c.read(BLOCK - 4, 8) != block0[-4:] + b"next":
+    lib.fail("read across the rolled block differs")
+
+c.close()
+rolled.stop()
+
+# a current block longer than a block is not a cell
+overlong = lib.Cell(hdd_bytes=16 * MB)
+os.makedirs(overlong.store)
+
+with open(os.path.join(overlong.store, "0.current"), "wb") as f:
+    f.write(os.urandom(BLOCK + 1))
+
+overlong.start(wait=False)
+
+if overlong.wait_exit() == 0 or "longer than a block" not in overlong.log():
+    lib.fail("a cell served over a current block longer than a block")
 
 print("ok")

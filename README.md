@@ -203,9 +203,11 @@ sends the table again, and a connect that fails, refused or not
 answered within five seconds, means the cell is not there: then
 everything in the table gets `link down` and the senders decide what
 that means for their operation. While the link is down a message
-arriving on the channel prompts a connect right away, so the answer
-is as fresh as the last attempt, never a timer. Nothing is shared,
-nothing is locked, nothing is retried below the operation.
+arriving on the channel prompts a connect right away, and everything
+that arrives during that attempt is answered by its outcome, so the
+answer is as fresh as the last attempt, never a timer, and never a
+queue of attempts. Nothing is shared, nothing is locked, nothing is
+retried below the operation.
 
 On the cell an accept the kernel refuses is logged and tried again a
 moment later; the connection waits in the backlog meanwhile. The

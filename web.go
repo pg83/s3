@@ -380,23 +380,11 @@ func objURL(bucket, key string) string {
 }
 
 func clockOf(timestamp string) string {
-	t, err := time.Parse(time.RFC3339Nano, timestamp)
-
-	if err != nil {
-		return timestamp
-	}
-
-	return t.UTC().Format("15:04:05")
+	return throw2(time.Parse(time.RFC3339Nano, timestamp)).UTC().Format("15:04:05")
 }
 
 func stampOf(timestamp string) string {
-	t, err := time.Parse(time.RFC3339Nano, timestamp)
-
-	if err != nil {
-		return timestamp
-	}
-
-	return t.UTC().Format("2006-01-02 15:04:05")
+	return throw2(time.Parse(time.RFC3339Nano, timestamp)).UTC().Format("2006-01-02 15:04:05")
 }
 
 func sizeOf(n int64) string {

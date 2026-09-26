@@ -102,4 +102,29 @@ cell.stop()
 if "waiting for the flusher" not in cell.log():
     lib.fail("the tight store never made the writer wait")
 
+# a load with no room for even one copy: a block on the HDD cannot be read, the current block still can
+small = tempfile.mkdtemp(prefix="s3small-")
+load = os.path.join(small, "load")
+os.mkdir(load)
+subprocess.run(["mount", "-t", "tmpfs", "-o", "size=1m", "tmpfs", load], check=True)
+
+cell = lib.Cell(hdd_bytes=32 * MB, root=small).start()
+c = cell.client()
+c.append(os.urandom(BLOCK))
+last = c.append(b"still here")
+
+deadline = time.time() + 10
+while time.time() < deadline and lib.ready_blocks(cell.store):
+    time.sleep(0.1)
+if lib.ready_blocks(cell.store):
+    lib.fail(f"the store still holds full blocks {lib.ready_blocks(cell.store)}")
+
+if c.call(lib.OP_READ, struct.pack(">QI", 0, 16)) != (lib.OP_FAIL, lib.CODE_IO):
+    lib.fail("a read the load cannot hold was not refused")
+
+if c.read(last, 10) != b"still here":
+    lib.fail("the current block was not served past a load with no room")
+
+cell.stop()
+
 print("ok")

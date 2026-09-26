@@ -8,7 +8,7 @@ coverage:
   status:
     project:
       go:
-        target: 88%
+        target: 97%
         threshold: 0%
         informational: false
         flags:

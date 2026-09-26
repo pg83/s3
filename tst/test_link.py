@@ -91,6 +91,17 @@ if status != 200:
 if took > 3:
     lib.fail(f"put waited {took:.1f}s for the host behind the hole")
 
+# a client that leaves while its read waits on the hole: the read is cancelled, the link behind the hole forgets it when its dial fails, and the front goes on
+for _ in range(3):
+    gone = socket.create_connection(("127.0.0.1", front.port))
+    gone.sendall(f"GET /hole/{victim} HTTP/1.1\r\nHost: x\r\n\r\n".encode())
+    time.sleep(0.3)
+    gone.close()
+
+status, _, body = holed.request("GET", "/hole/after")
+if status != 200 or body != data:
+    lib.fail(f"get after a client left mid-read: {status} {len(body)}")
+
 wait("the debt of host 2", lambda: etcd.has("repair/h2/hole/after"))
 
 m = etcd.manifest("hole", "after")

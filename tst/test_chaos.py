@@ -22,7 +22,7 @@ if etcd is None:
 # many: a link breaks about every twentieth frame, and a third of the dials
 # that follow are refused as well, which is what makes a put land on two
 # hosts and owe the third.
-LINKS = "accept:3,dial:3,link read:20,link write:20"
+LINKS = "all:5000,-cell read,-cell write,accept:3,dial:3,link read:20,link write:20"
 CELLS = "accept:3,cell read:20,cell write:20"
 
 etcd.start()
@@ -85,6 +85,12 @@ for key, data in blobs.items():
 
     if body != data:
         lib.fail(f"get {key} after the repairs: {len(body)} bytes of {len(data)}")
+
+# the browser runs the very same binary with nothing armed, which is how the ordinary one behaves
+web = cluster.web(env={"S3_CHAOS": None})
+status, _, body = web.request("GET", "/b/chaos")
+if status != 200 or b'href="/o/chaos/o00"' not in body:
+    lib.fail(f"web with nothing armed: {status} {body[-500:]}")
 
 if os.environ.get("S3_CHAOS"):
     # the refusals happened, on both sides

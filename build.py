@@ -220,7 +220,7 @@ if COVERAGE:
         inputs=["$(S)/dev/coverage.py"],
         outputs=["$(B)/coverage.out"],
         deps=e2e_tests,
-        cmd=["python3", "$(S)/dev/coverage.py", "--output", "$(B)/coverage.out", "--minimum", "85", *coverage_dirs],
+        cmd=["python3", "$(S)/dev/coverage.py", "--output", "$(B)/coverage.out", "--minimum", "95", *coverage_dirs],
         cwd="$(S)",
         env=GO_ENV,
         descr="CV",

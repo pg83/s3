@@ -204,6 +204,55 @@ status, _, body = get("old")
 if status != 200 or body != old_data:
     lib.fail(f"get upgraded: {status}")
 
+def legacy_of(m):
+    return {"size": m["size"], "md5": m["md5"], "mtime": m["mtime"],
+            "pieces": [{"cell": p["cell"], "offset": p["offset"], "piece": p["piece"]} for p in lib.pieces(m)]}
+
+
+def legacy_put(key):
+    data = os.urandom(12345)
+    s3.request("PUT", "/big/" + key, data)
+    wait(f"three pieces of {key}", lambda: len(lib.pieces(etcd.manifest("big", key))) == 3)
+    m = etcd.manifest("big", key)
+    etcd.put("obj/big/" + key, json.dumps(legacy_of(m)).encode())
+    return data, m
+
+
+# a legacy record whose first half is the bad one reads through the second half and the parity
+old2, mo2 = legacy_put("old2")
+lp0 = next(p for p in lib.pieces(mo2) if p["piece"] == 0)
+cluster.corrupt(lp0["cell"], lp0["offset"], 16)
+status, _, body = get("old2")
+if status != 200 or body != old2:
+    lib.fail(f"get legacy with its first half corrupt: {status} {len(body)}")
+if not etcd.has(f"repair/h{cluster.host_of(lp0['cell'])}/big/old2"):
+    lib.fail("the corrupt first half was not queued on its host")
+
+# a legacy record whose second half is away reads through the first half and the parity, and suspects nothing
+old4, mo4 = legacy_put("old4")
+away = cluster.host_of(next(p for p in lib.pieces(mo4) if p["piece"] == 1)["cell"])
+cluster.host(away).stop()
+status, _, body = get("old4")
+cluster.host(away).start()
+if status != 200 or body != old4:
+    lib.fail(f"get legacy with its second half away: {status} {len(body)}")
+if any(etcd.has(f"repair/h{h}/big/old4") for h in range(3)):
+    lib.fail("an absent half of a legacy record was suspected")
+
+# a legacy record found sound by a host of its own piece is written back with every hash, nothing moved
+old3, mo3 = legacy_put("old3")
+sound = cluster.host_of(next(p for p in lib.pieces(mo3) if p["piece"] == 0)["cell"])
+etcd.put(f"repair/h{sound}/big/old3", b"")
+wait("the sound legacy record to be upgraded", lambda: not etcd.has(f"repair/h{sound}/big/old3") and "chunks" in etcd.manifest("big", "old3"))
+mu3 = etcd.manifest("big", "old3")
+if any(len(p.get("xxh", "")) != 16 for p in lib.pieces(mu3)):
+    lib.fail(f"upgraded sound record lacks hashes: {mu3}")
+if [(p["cell"], p["offset"]) for p in lib.pieces(mu3)] != [(p["cell"], p["offset"]) for p in lib.pieces(mo3)]:
+    lib.fail(f"the upgrade of a sound record moved a piece: {mo3} -> {mu3}")
+status, _, body = get("old3")
+if status != 200 or body != old3:
+    lib.fail(f"get upgraded sound record: {status} {len(body)}")
+
 # the browser counts pieces over chunks
 web = cluster.web()
 status, _, body = web.request("GET", "/b/big")

@@ -134,6 +134,114 @@ for full in (True, False):
 if keys_under("obj/life/") or keys_under("bkt/"):
     lib.fail(f"keys left behind: {keys_under('obj/life/')} {keys_under('bkt/')}")
 
+# what the front does not do, it says so
+for method, path, headers, want, mark in (
+    ("POST", "/life/k?uploads", None, 501, b"NotImplemented"),
+    ("PUT", "/life/copy", {"x-amz-copy-source": "/life/k"}, 501, b"NotImplemented"),
+    ("PUT", "/", None, 405, b"MethodNotAllowed"),
+    ("POST", "/life", None, 405, b"MethodNotAllowed"),
+    ("POST", "/life/k", None, 405, b"MethodNotAllowed"),
+):
+    status, _, out = s3.request(method, path, b"", headers)
+    if status != want or mark not in out:
+        lib.fail(f"{method} {path}: {status} {out[:200]}")
+
+status, _, _ = s3.request("HEAD", "/life/nope")
+if status != 404:
+    lib.fail(f"HEAD of a missing key: {status}")
+
+# ranges the front does not serve
+s3.request("PUT", "/life/r", b"0123456789")
+for spec in ("bytes=0-1,3-4", "bytes=-0", "bits=0-1"):
+    status, _, out = s3.request("GET", "/life/r", headers={"Range": spec})
+    if status != 416 or b"InvalidRange" not in out:
+        lib.fail(f"range {spec}: {status} {out[:200]}")
+
+# a body the SDKs send in chunks, the signature of each in front of it
+data = os.urandom(70000)
+
+
+def chunked(data, size):
+    out = b""
+    for i in range(0, len(data), size):
+        piece = data[i:i + size]
+        out += f"{len(piece):x};chunk-signature={'0' * 64}\r\n".encode() + piece + b"\r\n"
+    return out + b"0;chunk-signature=" + b"0" * 64 + b"\r\n\r\n"
+
+
+for headers in (
+    {"x-amz-content-sha256": "STREAMING-AWS4-HMAC-SHA256-PAYLOAD", "x-amz-decoded-content-length": str(len(data))},
+    {"Content-Encoding": "aws-chunked", "x-amz-decoded-content-length": str(len(data))},
+):
+    status, h, _ = s3.request("PUT", "/life/chunked", chunked(data, 16384), headers)
+    if status != 200 or h.get("etag") != '"' + lib.md5(data) + '"':
+        lib.fail(f"chunked put {headers}: {status} {h.get('etag')}")
+    status, _, body = s3.request("GET", "/life/chunked")
+    if status != 200 or body != data:
+        lib.fail(f"chunked get: {status} {len(body)}")
+
+# a manifest that is not one: the object answers with an error, the browser too
+s3.request("PUT", "/life/plain", b"data")
+etcd.put("obj/life/bad", b'{"size": "big"}')
+status, _, out = s3.request("GET", "/life/bad")
+if status != 500 or b"InternalError" not in out:
+    lib.fail(f"get of a broken manifest: {status} {out[:200]}")
+
+web = cluster.web()
+status, _, _ = web.request("GET", "/o/life/bad")
+if status != 500:
+    lib.fail(f"web get of a broken manifest: {status}")
+etcd.delete("obj/life/bad")
+
+status, _, _ = web.request("GET", "/nope")
+if status != 404:
+    lib.fail(f"web path nobody serves: {status}")
+for path in ("/b/", "/b/life/x"):
+    status, _, body = web.request("GET", path)
+    if status != 200 or b"no such bucket" not in body:
+        lib.fail(f"web {path}: {status}")
+status, headers, body = web.request("GET", "/o/life/plain")
+if status != 200 or body != b"data" or headers.get("content-type") != "application/octet-stream":
+    lib.fail(f"web object without a type: {status} {headers.get('content-type')}")
+
+# a piece whose cell is not in the config, or that lies past the head of its cell, is simply absent for the read
+deadline = time.time() + 10
+while time.time() < deadline and len(lib.pieces(etcd.manifest("life", "plain"))) < 3:
+    time.sleep(0.05)
+good = etcd.manifest("life", "plain")
+for piece, field, value in ((0, "cell", 99), (1, "offset", 1 << 40)):
+    m = json.loads(json.dumps(good))
+    next(p for p in lib.pieces(m) if p["piece"] == piece)[field] = value
+    etcd.put("obj/life/plain", json.dumps(m).encode())
+    status, _, body = s3.request("GET", "/life/plain")
+    if status != 200 or body != b"data":
+        lib.fail(f"get with piece {piece} at {field}={value}: {status} {body!r}")
+etcd.put("obj/life/plain", json.dumps(good).encode())
+
+# the browser pages a folder five hundred entries at a time
+pages = [f"p{i:04d}" for i in range(501)]
+
+
+def put_pages(keys):
+    for key in keys:
+        s3.request("PUT", "/life/" + key, b"p")
+
+
+threads = [threading.Thread(target=put_pages, args=(pages[i::16],)) for i in range(16)]
+for th in threads:
+    th.start()
+for th in threads:
+    th.join()
+status, _, body = web.request("GET", "/b/life")
+html = body.decode()
+first = html.find('href="/b/life?prefix=&amp;after=')
+if status != 200 or first < 0 or 'href="/o/life/p0500"' in html:
+    lib.fail(f"web first page of many: {status} {html[-600:]}")
+link = html[first + len('href="'):html.find('"', first + len('href="'))].replace("&amp;", "&")
+status, _, body = web.request("GET", link)
+if status != 200 or b'href="/o/life/p0500"' not in body or b'href="/o/life/p0000"' in body:
+    lib.fail(f"web second page of many: {status} {body[-600:]}")
+
 # hundreds of keys
 many = {f"k{i:04d}": bytes([i % 251]) * (i % 7 + 1) for i in range(300)}
 many.update({f"d/{i}": b"folder" for i in range(5)})
@@ -202,6 +310,18 @@ objects, _, truncated, nxt = listing("many", "prefix=d/&max-keys=5")
 if [o[0] for o in objects] != [f"d/{i}" for i in range(5)] or truncated or nxt:
     lib.fail(f"list v1 folder: {objects} {truncated} {nxt}")
 
+objects, _, truncated, nxt = listing("many", "max-keys=2")
+if [o[0] for o in objects] != ["d/0", "d/1"] or not truncated or nxt != "d/1":
+    lib.fail(f"list v1 cut short: {objects} {truncated} {nxt}")
+
+objects, _, _, _ = listing("many", "list-type=2&prefix=d/&encoding-type=url")
+if [o[0] for o in objects] != [f"d%2F{i}" for i in range(5)]:
+    lib.fail(f"list url encoded: {objects}")
+
+objects, prefixes, truncated, nxt = listing("many", "list-type=2&prefix=k02&continuation-token=k05")
+if objects or prefixes or truncated or nxt:
+    lib.fail(f"list from past the prefix: {objects} {prefixes} {truncated} {nxt}")
+
 # three hundred keys in one delete request
 status, _, out = multi_delete("many", sorted(k for k in many if k.startswith("k")))
 deleted = [d.find(NS + "Key").text for d in ET.fromstring(out).iter(NS + "Deleted")]
@@ -225,6 +345,26 @@ if keys_under("obj/many/"):
 
 # a repair whose own cells are down when the key is queued
 cluster.repair()
+
+# entries with nothing to mend are dropped: no key under the host, a key that is gone, an empty object, a key whose pieces are all sound
+s3.request("PUT", "/photos/whole", b"whole")
+s3.request("PUT", "/photos/hollow", b"")
+deadline = time.time() + 10
+while time.time() < deadline and len(lib.pieces(etcd.manifest("photos", "whole"))) < 3:
+    time.sleep(0.05)
+whole = etcd.manifest("photos", "whole")
+idle = ["repair/h0/junk", "repair/h0/photos/nope", "repair/h0/photos/hollow", "repair/h0/photos/whole"]
+for key in idle:
+    etcd.put(key, b"")
+deadline = time.time() + 15
+while time.time() < deadline and any(etcd.has(key) for key in idle):
+    time.sleep(0.1)
+left = [key for key in idle if etcd.has(key)]
+if left:
+    lib.fail(f"entries with nothing to mend were kept: {left}")
+if etcd.manifest("photos", "whole") != whole:
+    lib.fail("a repair with nothing to mend rewrote the key")
+
 blob = os.urandom(12345)
 
 cluster.host(1).stop()

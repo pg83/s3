@@ -280,13 +280,26 @@ func (l *Link) connect(again bool) net.Conn {
 
 		select {
 		case m := <-l.inbox:
-			if m.op == opCancel {
-				l.forget(m.reply)
-			} else {
-				l.accept(m)
-			}
+			l.take(m)
 		case <-time.After(idlePace):
 		}
+
+		for more := true; more; {
+			select {
+			case m := <-l.inbox:
+				l.take(m)
+			default:
+				more = false
+			}
+		}
+	}
+}
+
+func (l *Link) take(m message) {
+	if m.op == opCancel {
+		l.forget(m.reply)
+	} else {
+		l.accept(m)
 	}
 }
 
