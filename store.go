@@ -136,6 +136,10 @@ func repairKey(host, bucket, key string) string {
 	return "repair/" + host + "/" + bucket + "/" + key
 }
 
+func inprogressKey(host, bucket, key string) string {
+	return "inprogress/" + host + "/" + bucket + "/" + key
+}
+
 func pieceLen(size int64) int64 {
 	return (size + 1) / 2
 }
@@ -353,6 +357,7 @@ func (s *Store) put(gone <-chan struct{}, bucket, key string, data []byte, conte
 
 	acked := time.Now()
 	pending := 0
+	short := map[string]bool{}
 
 	m.Chunks = make([]Chunk, len(placers))
 
@@ -362,25 +367,44 @@ func (s *Store) put(gone <-chan struct{}, bucket, key string, data []byte, conte
 		if p.pending > 0 {
 			pending++
 		}
+
+		for j := range 3 {
+			if _, ok := p.placed[j]; !ok {
+				short[p.plan[j].host] = true
+			}
+		}
 	}
 
-	rev := s.etcd.put(objKey(bucket, key), throw2(json.Marshal(m)))
+	marks := make([]string, 0, len(short))
+
+	for host := range short {
+		marks = append(marks, inprogressKey(host, bucket, key))
+	}
+
+	sort.Strings(marks)
+
+	rev := s.etcd.putMarked(objKey(bucket, key), throw2(json.Marshal(m)), marks, m.Mtime.Format(time.RFC3339Nano))
 
 	slog.Debug("store: put", "key", key, "size", m.Size, "chunks", len(placers), "hash", hashed.Sub(start), "two", acked.Sub(hashed),
 		"etcd", time.Since(acked), "pending", pending)
 
 	if pending > 0 {
-		go s.settle(placers, bucket, key, m, rev)
+		go s.settle(placers, bucket, key, m, rev, marks)
 	} else {
-		s.settle(placers, bucket, key, m, rev)
+		s.settle(placers, bucket, key, m, rev, marks)
 	}
 
 	return m, nil
 }
 
-func (s *Store) settle(placers []*placer, bucket, key string, m Manifest, rev int64) {
+func (s *Store) settle(placers []*placer, bucket, key string, m Manifest, rev int64, marks []string) {
+	if len(marks) == 0 {
+		return
+	}
+
 	try(func() {
-		changed := false
+		var manifest []byte
+
 		owed := map[string]bool{}
 
 		for i, p := range placers {
@@ -388,7 +412,7 @@ func (s *Store) settle(placers []*placer, bucket, key string, m Manifest, rev in
 
 			if len(p.placed) > len(m.Chunks[i].Pieces) {
 				m.Chunks[i].Pieces = p.pieces3()
-				changed = true
+				manifest = throw2(json.Marshal(m))
 			}
 
 			for j := range 3 {
@@ -398,12 +422,16 @@ func (s *Store) settle(placers []*placer, bucket, key string, m Manifest, rev in
 			}
 		}
 
-		if changed && !s.etcd.putIfRevision(objKey(bucket, key), throw2(json.Marshal(m)), rev) {
-			slog.Warn("store: key changed before its third pieces landed", "bucket", bucket, "key", key)
-		}
+		debts := make([]string, 0, len(owed))
 
 		for host := range owed {
-			s.owe(host, bucket, key)
+			debts = append(debts, repairKey(host, bucket, key))
+		}
+
+		sort.Strings(debts)
+
+		if !s.etcd.settleMarked(objKey(bucket, key), manifest, rev, marks, debts) {
+			slog.Warn("store: key changed before its third pieces landed", "bucket", bucket, "key", key)
 		}
 	}).catch(func(exc *Exception) {
 		slog.Error("store: settle", "bucket", bucket, "key", key, "err", exc.error())

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 )
 
 var logLevel = new(slog.LevelVar)
@@ -66,6 +67,14 @@ func main() {
 
 			parse(fs, debug)
 			runFront(loadConfig(*config), listen)
+		case "scan":
+			fs, debug := flags("scan")
+			config := fs.String("c", "", "config file")
+			host := fs.String("host", "", "name of this host in the config")
+			age := fs.Duration("age", 10*time.Minute, "how long a put may wait for its third pieces before its host owes them")
+
+			parse(fs, debug)
+			runScan(loadConfig(*config), *host, *age)
 		case "repair":
 			fs, debug := flags("repair")
 			config := fs.String("c", "", "config file")
@@ -109,6 +118,7 @@ Commands:
                                               append-only log on one disk
   front -c config.json -listen addr [-listen addr]   S3 API over the cells and etcd
   repair -c config.json -host name            rebuild the pieces this host owes
+  scan -c config.json -host name [-age 10m]   hand long unsettled puts to this host's repair
   web -c config.json -listen addr             browse buckets and objects
 `)
 }

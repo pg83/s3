@@ -47,6 +47,7 @@ an etcd every host reaches, and a config file on every host.
 s3 cell -listen addr [-listen addr] -load dir -store dir -hdd device
 s3 front -c config.json -listen addr [-listen addr]
 s3 repair -c config.json -host name
+s3 scan -c config.json -host name [-age 10m]
 s3 web -c config.json -listen addr
 ```
 
@@ -85,6 +86,16 @@ host owes into the host's own cells, which it reaches over loopback
 only; it refuses a config that puts them anywhere else. A host that
 stays down keeps its queue until it returns; nobody repairs on its
 behalf.
+
+### Scan
+
+`s3 scan` runs once and exits; run it on every host from cron, every
+quarter of an hour or so, with the host's `-host`. A PUT answered
+before every piece was on disk leaves the key marked for the host
+still owed a piece until the front has seen that piece land, or
+queued the debt itself. A front that dies in between leaves the mark
+behind, and the scan hands every mark of its host older than `-age`
+to that host's repair.
 
 ### Browser
 
