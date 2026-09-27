@@ -459,8 +459,7 @@ class Cluster:
         return self
 
     def repair(self, env=None):
-        for h in self.hosts:
-            Proc(f"repair-h{h.index}", ["repair", "-debug", "-c", self.config, "-host", f"h{h.index}"], env).start()
+        return [Proc(f"repair-h{h.index}", ["repair", "-debug", "-c", self.config, "-host", f"h{h.index}"], env).start() for h in self.hosts]
 
     def web(self, env=None):
         port = free_port()

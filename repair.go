@@ -65,13 +65,13 @@ func (r *Repairer) pass(prefix string) {
 			bucket, key, ok := strings.Cut(strings.TrimPrefix(entry.key, prefix), "/")
 
 			if !ok {
-				r.store.etcd.del(entry.key)
+				r.store.etcd.delIfRevision(entry.key, entry.rev)
 
 				continue
 			}
 
 			try(func() {
-				r.fix(bucket, key)
+				r.fix(bucket, key, entry.rev)
 			}).catch(func(exc *Exception) {
 				slog.Warn("repair", "bucket", bucket, "key", key, "err", exc.error())
 			})
@@ -83,12 +83,12 @@ func (r *Repairer) pass(prefix string) {
 	}
 }
 
-func (r *Repairer) fix(bucket, key string) {
+func (r *Repairer) fix(bucket, key string, entry int64) {
 	for {
 		m, rev, err := r.store.manifest(bucket, key)
 
 		if errors.Is(err, errNoSuchKey) || (err == nil && m.Size == 0) {
-			r.drop(bucket, key)
+			r.drop(bucket, key, entry)
 
 			return
 		}
@@ -124,13 +124,13 @@ func (r *Repairer) fix(bucket, key string) {
 		}
 
 		if !changed {
-			r.drop(bucket, key)
+			r.drop(bucket, key, entry)
 
 			return
 		}
 
 		if r.store.etcd.putIfRevision(objKey(bucket, key), throw2(json.Marshal(m)), rev) {
-			r.drop(bucket, key)
+			r.drop(bucket, key, entry)
 			slog.Info("repair: mended", "bucket", bucket, "key", key, "chunks", len(m.Chunks))
 
 			return
@@ -213,6 +213,8 @@ func (r *Repairer) pieceOf(key string, i int, by map[int]Piece) int {
 	return -1
 }
 
-func (r *Repairer) drop(bucket, key string) {
-	r.store.etcd.del(repairKey(r.host, bucket, key))
+func (r *Repairer) drop(bucket, key string, entry int64) {
+	if !r.store.etcd.delIfRevision(repairKey(r.host, bucket, key), entry) {
+		slog.Info("repair: the entry was written again meanwhile, kept for another pass", "bucket", bucket, "key", key)
+	}
 }
