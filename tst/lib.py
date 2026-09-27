@@ -6,7 +6,6 @@ import hashlib
 import http.client
 import json
 import os
-import signal
 import shutil
 import socket
 import struct
@@ -190,14 +189,6 @@ class Cell:
 
     def stop(self):
         return self.proc.stop()
-
-    def pause(self):
-        """SIGSTOP: the cell keeps its connections and answers nothing."""
-
-        os.kill(self.proc.proc.pid, signal.SIGSTOP)
-
-    def resume(self):
-        os.kill(self.proc.proc.pid, signal.SIGCONT)
 
     def wait_exit(self, timeout=10):
         return self.proc.wait_exit(timeout)

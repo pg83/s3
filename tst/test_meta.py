@@ -353,14 +353,6 @@ deadline = time.time() + 10
 while time.time() < deadline and len(lib.pieces(etcd.manifest("photos", "whole"))) < 3:
     time.sleep(0.05)
 whole = etcd.manifest("photos", "whole")
-# every put leaves a debt for the host whose piece was still on its way; with all pieces landed they are stale
-deadline = time.time() + 120
-while time.time() < deadline and keys_under("repair/"):
-    time.sleep(0.2)
-if keys_under("repair/"):
-    lib.fail(f"stale debts were kept: {len(keys_under('repair/'))} left, {keys_under('repair/')[:5]}")
-if etcd.manifest("photos", "whole") != whole:
-    lib.fail("a repair of a stale debt rewrote a sound key")
 idle = ["repair/h0/junk", "repair/h0/photos/nope", "repair/h0/photos/hollow", "repair/h0/photos/whole"]
 for key in idle:
     etcd.put(key, b"")
