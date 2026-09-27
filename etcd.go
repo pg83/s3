@@ -118,6 +118,16 @@ func (e *Etcd) put(key string, value []byte) int64 {
 	return throw2(e.c.Put(context.Background(), key, string(value))).Header.Revision
 }
 
+func (e *Etcd) putWith(key string, value []byte, also []string) int64 {
+	ops := []clientv3.Op{clientv3.OpPut(key, string(value))}
+
+	for _, k := range also {
+		ops = append(ops, clientv3.OpPut(k, ""))
+	}
+
+	return throw2(e.c.Txn(context.Background()).Then(ops...).Commit()).Header.Revision
+}
+
 func (e *Etcd) putIfRevision(key string, value []byte, rev int64) bool {
 	resp := throw2(e.c.Txn(context.Background()).
 		If(clientv3.Compare(clientv3.ModRevision(key), "=", rev)).

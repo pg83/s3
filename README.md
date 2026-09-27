@@ -125,7 +125,9 @@ back it up the way you back up any etcd.
 A PUT is answered, with the md5 as its ETag, once two of the three
 pieces of every part of the object are on disk on two hosts. The
 third follows; if its host is down, the host owes it and pays when it
-is back. With one host down, PUTs succeed and GETs are served through
+is back. The debt is recorded together with the key, before the
+answer, so a front that dies before the third piece lands leaves
+nothing unpaid. With one host down, PUTs succeed and GETs are served through
 the parity. With two hosts down, a GET of an object with pieces there
 fails, and a PUT is turned away with `503 SlowDown` for the client to
 retry; no key is written for it, and what did land is garbage on its
