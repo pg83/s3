@@ -84,11 +84,27 @@ def md5(data):
     return hashlib.md5(data).hexdigest()
 
 
-def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
+# Every scenario hands out ports from a range of its own, below the
+# ephemeral range: bind(0) gave a port back to the kernel at once, and a
+# scenario running alongside could get the same one before our process
+# bound it, then answer for it.
+SCENARIOS = sorted(n[:-3] for n in os.listdir(os.path.dirname(os.path.abspath(__file__))) if n.startswith("test_") and n.endswith(".py"))
+PORT_SPAN = 500
+PORT_BASE = 20000 + PORT_SPAN * (SCENARIOS.index(SCENARIO) if SCENARIO in SCENARIOS else len(SCENARIOS))
+PORTS = iter(range(PORT_BASE, PORT_BASE + PORT_SPAN))
 
-        return s.getsockname()[1]
+
+def free_port():
+    for port in PORTS:
+        with socket.socket() as s:
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                continue
+
+        return port
+
+    fail(f"{SCENARIO} used up its {PORT_SPAN} ports")
 
 
 def wait_port(port, timeout=10, proc=None):
@@ -285,6 +301,9 @@ class Cell:
 class Client:
     def __init__(self, port):
         self.sock = socket.create_connection(("127.0.0.1", port))
+        # As the front's links have it (Go sets TCP_NODELAY): a frame is not
+        # held back for the ACK of the one before, which the cell delays.
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.next_id = 0
 
     def close(self):
