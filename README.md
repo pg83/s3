@@ -44,9 +44,9 @@ A cluster is at least three hosts, each with some disks and an SSD,
 an etcd every host reaches, and a config file on every host.
 
 ```
-s3 cell -listen addr [-listen addr] -load dir -store dir -hdd device
-s3 front -c config.json -listen addr [-listen addr]
-s3 repair -c config.json -host name
+s3 cell -listen addr [-listen addr] -load dir -store dir -hdd device [-metrics addr]
+s3 front -c config.json -listen addr [-listen addr] [-metrics addr]
+s3 repair -c config.json -host name [-metrics addr]
 s3 scan -c config.json -host name [-age 10m]
 s3 web -c config.json -listen addr
 ```
@@ -104,6 +104,32 @@ walks a bucket folder by folder, 500 entries a page, and
 `/o/<bucket>/<key>` fetches an object the way the front does. An
 object with a piece still owed is marked until its host has paid.
 The page is a snapshot; it does not refresh.
+
+### Metrics
+
+A cell, a front and a repair given `-metrics addr` serve Prometheus
+metrics at `/metrics` there; put it on loopback, it has no auth.
+Counters and latency histograms keep what the process has done since it
+started; gauges are computed when the page is asked for.
+
+- cell: `s3_cell_write_seconds` (an append from arrival to its reply,
+  fsync included), `s3_cell_writes_total{result}`,
+  `s3_cell_read_seconds`, `s3_cell_reads_total{result}`, the bytes of
+  both, `s3_cell_tick_seconds{phase}`, `s3_cell_flush_seconds{phase}`,
+  `s3_cell_hdd_read_seconds`, `s3_cell_blocks_total{source}` (lru, store
+  or hdd), `s3_cell_lru_evictions_total`, `s3_cell_errors_total{op}`;
+  gauges: the write and read queues, the full blocks waiting for the
+  HDD, the LRU in blocks and bytes, the head, the HDD pointer (how far
+  the log is on the disk) and the capacity.
+- front: `s3_front_requests_total{method,target,code}` (499 when the
+  client left before an answer), `s3_front_request_seconds`, the bytes
+  received and sent, and the bodies in flight.
+- front and repair: `s3_link_seconds{cell,op}` (a request to a cell to
+  its reply), `s3_link_failures_total{cell,op,reason}`,
+  `s3_link_disconnects_total{cell}`, `s3_link_queue_messages{cell}`.
+- repair: `s3_repair_fixes_total{result}`, `s3_repair_pass_seconds`,
+  `s3_repair_pass_errors_total`; gauges: the entries of its repair queue
+  and the unsettled puts marked for its host.
 
 ### Configuration
 

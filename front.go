@@ -34,7 +34,7 @@ type Front struct {
 	slots chan struct{}
 }
 
-func runFront(cfg *Config, listen []string) {
+func runFront(cfg *Config, listen []string, metrics string) {
 	if len(listen) == 0 {
 		throwFmt("front: -listen is required")
 	}
@@ -46,6 +46,7 @@ func runFront(cfg *Config, listen []string) {
 		lns = append(lns, sys.accepts(throw2(net.Listen("tcp", addr))))
 	}
 
+	serveMetrics(metrics, f.gauges)
 	slog.Info("front: serving S3", "listen", listen)
 
 	for _, ln := range lns[1:] {
@@ -152,13 +153,79 @@ func s3Fail(w http.ResponseWriter, status int, code, message, resource string) {
 	writeXml(w, status, S3Error{Code: code, Message: message, Resource: resource})
 }
 
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+	sent   int
+}
+
+func (sw *statusWriter) WriteHeader(status int) {
+	if sw.status == 0 {
+		sw.status = status
+	}
+
+	sw.ResponseWriter.WriteHeader(status)
+}
+
+func (sw *statusWriter) Write(data []byte) (int, error) {
+	if sw.status == 0 {
+		sw.status = http.StatusOK
+	}
+
+	n, err := sw.ResponseWriter.Write(data)
+
+	sw.sent += n
+
+	return n, err
+}
+
+func requestLabels(r *http.Request) string {
+	method := "other"
+
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodPut, http.MethodPost, http.MethodDelete:
+		method = r.Method
+	}
+
+	target := "object"
+	bucket, key, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, "/"), "/")
+
+	switch {
+	case bucket == "":
+		target = "service"
+	case key == "":
+		target = "bucket"
+	}
+
+	return `method="` + method + `",target="` + target + `"`
+}
+
 func (f *Front) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	sw := &statusWriter{ResponseWriter: w}
+
 	try(func() {
-		f.route(w, r)
+		f.route(sw, r)
 	}).catch(func(exc *Exception) {
 		slog.Error("front", "method", r.Method, "path", r.URL.Path, "err", exc.error())
-		s3Fail(w, http.StatusInternalServerError, "InternalError", exc.error(), r.URL.Path)
+		s3Fail(sw, http.StatusInternalServerError, "InternalError", exc.error(), r.URL.Path)
 	})
+
+	code := sw.status
+
+	if code == 0 {
+		code = 499
+	}
+
+	labels := requestLabels(r)
+
+	metricTime("s3_front_request_seconds", labels, time.Since(start))
+	metricAdd("s3_front_requests_total", labels+`,code="`+strconv.Itoa(code)+`"`, 1)
+	metricAdd("s3_front_sent_bytes_total", "", float64(sw.sent))
+}
+
+func (f *Front) gauges() []gauge {
+	return append(f.store.gauges(), gauge{"s3_front_bodies_in_flight", "", float64(len(f.slots))})
 }
 
 func (f *Front) route(w http.ResponseWriter, r *http.Request) {
@@ -366,6 +433,7 @@ func (f *Front) objectOp(w http.ResponseWriter, r *http.Request, bucket, key str
 		start := time.Now()
 		data := readBody(r)
 
+		metricAdd("s3_front_received_bytes_total", "", float64(len(data)))
 		slog.Debug("front: body", "key", key, "size", len(data), "read", time.Since(start))
 
 		m, err := f.store.put(r.Context().Done(), bucket, key, data, r.Header.Get("Content-Type"))

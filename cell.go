@@ -38,6 +38,7 @@ type WriteReq struct {
 	data   []byte
 	cancel bool
 	out    chan reply
+	at     time.Time
 }
 
 type reqKey struct {
@@ -70,7 +71,7 @@ type Cell struct {
 	size     int64
 }
 
-func runCell(listen []string, load, store, hdd string) {
+func runCell(listen []string, load, store, hdd, metrics string) {
 	if len(listen) == 0 || load == "" || store == "" || hdd == "" {
 		throwFmt("cell: -listen, -load, -store and -hdd are required")
 	}
@@ -87,6 +88,7 @@ func runCell(listen []string, load, store, hdd string) {
 		lns = append(lns, sys.accepts(throw2(net.Listen("tcp", addr))))
 	}
 
+	serveMetrics(metrics, c.gauges)
 	slog.Info("cell: serving", "listen", listen, "block", c.num, "head", c.head(), "capacity", c.capacity)
 
 	go c.writer()
@@ -106,6 +108,7 @@ func (c *Cell) accept(ln net.Listener) {
 
 		if err != nil {
 			slog.Warn("cell: accept", "err", err)
+			metricAdd("s3_cell_errors_total", `op="accept"`, 1)
 			time.Sleep(acceptPause)
 
 			continue
@@ -283,14 +286,40 @@ func (c *Cell) writer() {
 		throw(c.current.Sync())
 
 		synced := time.Now()
+		accepted := 0
 
 		for i, req := range batch {
 			req.out <- replies[i]
+
+			if req.cancel {
+				continue
+			}
+
+			result := writeResult(replies[i])
+
+			if result == "ok" {
+				accepted += len(req.data)
+			}
+
+			metricTime("s3_cell_write_seconds", "", time.Since(req.at))
+			metricAdd("s3_cell_writes_total", `result="`+result+`"`, 1)
 		}
+
+		metricAdd("s3_cell_write_bytes_total", "", float64(accepted))
+		metricTime("s3_cell_tick_seconds", `phase="write"`, written.Sub(start))
+		metricTime("s3_cell_tick_seconds", `phase="sync"`, synced.Sub(written))
 
 		slog.Debug("cell: tick", "batch", len(batch), "bytes", bytes, "rolls", c.rolls,
 			"write", written.Sub(start), "sync", synced.Sub(written), "total", time.Since(start))
 	}
+}
+
+func writeResult(r reply) string {
+	if r.op == opAppend|opReply {
+		return "ok"
+	}
+
+	return codeName(failCode(r.body))
 }
 
 func (c *Cell) appendReply(id uint64, offset int64, err error) reply {
@@ -386,6 +415,10 @@ func (c *Cell) flush(buf []byte) {
 	default:
 	}
 
+	metricTime("s3_cell_flush_seconds", `phase="write"`, wrote.Sub(start))
+	metricTime("s3_cell_flush_seconds", `phase="sync"`, synced.Sub(wrote))
+	metricAdd("s3_cell_hdd_written_bytes_total", "", float64(len(full)*blockSize))
+
 	slog.Debug("cell: flushed", "blocks", len(full), "first", full[0], "last", full[len(full)-1],
 		"write", wrote.Sub(start), "sync", synced.Sub(wrote), "remove", time.Since(synced))
 }
@@ -479,6 +512,7 @@ func (c *Cell) open(l *loaded, buf []byte, num int64) *os.File {
 	if e, ok := l.byNum[num]; ok {
 		if f, err := os.Open(c.loadPath(num)); err == nil {
 			l.order.MoveToFront(e)
+			metricAdd("s3_cell_blocks_total", `source="lru"`, 1)
 
 			return f
 		}
@@ -488,10 +522,14 @@ func (c *Cell) open(l *loaded, buf []byte, num int64) *os.File {
 	}
 
 	if f, err := os.Open(c.currentPath(num)); err == nil {
+		metricAdd("s3_cell_blocks_total", `source="store"`, 1)
+
 		return f
 	}
 
 	if f, err := os.Open(c.readyPath(num)); err == nil {
+		metricAdd("s3_cell_blocks_total", `source="store"`, 1)
+
 		return f
 	}
 
@@ -499,6 +537,8 @@ func (c *Cell) open(l *loaded, buf []byte, num int64) *os.File {
 
 	throw2(c.hdd.ReadAt(buf, num*blockSize))
 
+	metricTime("s3_cell_hdd_read_seconds", "", time.Since(start))
+	metricAdd("s3_cell_blocks_total", `source="hdd"`, 1)
 	slog.Debug("cell: load", "block", num, "read", time.Since(start))
 
 	tmp := c.loadPath(num) + ".tmp"
@@ -522,6 +562,7 @@ func (c *Cell) open(l *loaded, buf []byte, num int64) *os.File {
 		l.order.Remove(last)
 		delete(l.byNum, old)
 		throw(os.Remove(c.loadPath(old)))
+		metricAdd("s3_cell_lru_evictions_total", "", 1)
 	}
 
 	throw(os.Rename(tmp, c.loadPath(num)))
@@ -529,6 +570,48 @@ func (c *Cell) open(l *loaded, buf []byte, num int64) *os.File {
 	l.byNum[num] = l.order.PushFront(num)
 
 	return throw2(os.Open(c.loadPath(num)))
+}
+
+func (c *Cell) pointers() (int64, int64) {
+	for {
+		current := blockNumbers(c.store, ".current")
+		ready := blockNumbers(c.store, "")
+
+		if len(current) == 0 {
+			continue
+		}
+
+		last := current[len(current)-1]
+		info, err := os.Stat(c.currentPath(last))
+
+		if err != nil {
+			continue
+		}
+
+		low := current[0]
+
+		if len(ready) > 0 {
+			low = min(low, ready[0])
+		}
+
+		return last*blockSize + info.Size(), low * blockSize
+	}
+}
+
+func (c *Cell) gauges() []gauge {
+	head, hdd := c.pointers()
+	lru := float64(len(blockNumbers(c.load, "")))
+
+	return []gauge{
+		{"s3_cell_write_queue_requests", "", float64(len(c.writes))},
+		{"s3_cell_read_queue_requests", "", float64(len(c.reads))},
+		{"s3_cell_flush_queue_blocks", "", float64(len(blockNumbers(c.store, "")))},
+		{"s3_cell_lru_blocks", "", lru},
+		{"s3_cell_lru_bytes", "", lru * blockSize},
+		{"s3_cell_head_bytes", "", float64(head)},
+		{"s3_cell_hdd_pointer_bytes", "", float64(hdd)},
+		{"s3_cell_capacity_bytes", "", float64(c.capacity)},
+	}
 }
 
 func (c *Cell) status() (int64, int64) {

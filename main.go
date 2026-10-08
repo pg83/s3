@@ -17,6 +17,10 @@ func flags(name string) (*flag.FlagSet, *bool) {
 	return fs, fs.Bool("debug", false, "log the timing of every tick, flush, put and get")
 }
 
+func metricsFlag(fs *flag.FlagSet) *string {
+	return fs.String("metrics", "", "address to serve Prometheus metrics on, e.g. 127.0.0.1:9100")
+}
+
 func parse(fs *flag.FlagSet, debug *bool) {
 	throw(fs.Parse(os.Args[2:]))
 
@@ -37,6 +41,8 @@ func main() {
 		armChaos()
 		exitOnSignal()
 
+		go collectMetrics()
+
 		switch os.Args[1] {
 		case "cell":
 			fs, debug := flags("cell")
@@ -51,9 +57,10 @@ func main() {
 			load := fs.String("load", "", "directory on the SSD for blocks being read")
 			store := fs.String("store", "", "directory on the SSD for blocks being written")
 			hdd := fs.String("hdd", "", "raw block device for the log")
+			metrics := metricsFlag(fs)
 
 			parse(fs, debug)
-			runCell(listen, *load, *store, *hdd)
+			runCell(listen, *load, *store, *hdd, *metrics)
 		case "front":
 			fs, debug := flags("front")
 			config := fs.String("c", "", "config file")
@@ -65,8 +72,10 @@ func main() {
 				return nil
 			})
 
+			metrics := metricsFlag(fs)
+
 			parse(fs, debug)
-			runFront(loadConfig(*config), listen)
+			runFront(loadConfig(*config), listen, *metrics)
 		case "scan":
 			fs, debug := flags("scan")
 			config := fs.String("c", "", "config file")
@@ -79,9 +88,10 @@ func main() {
 			fs, debug := flags("repair")
 			config := fs.String("c", "", "config file")
 			host := fs.String("host", "", "name of this host in the config")
+			metrics := metricsFlag(fs)
 
 			parse(fs, debug)
-			runRepair(loadConfig(*config), *host)
+			runRepair(loadConfig(*config), *host, *metrics)
 		case "web":
 			fs, debug := flags("web")
 			config := fs.String("c", "", "config file")
@@ -114,10 +124,12 @@ func printUsage() {
 	os.Stderr.WriteString(`Usage: s3 command [flags]
 
 Commands:
-  cell -listen addr [-listen addr] -load dir -store dir -hdd device
+  cell -listen addr [-listen addr] -load dir -store dir -hdd device [-metrics addr]
                                               append-only log on one disk
-  front -c config.json -listen addr [-listen addr]   S3 API over the cells and etcd
-  repair -c config.json -host name            rebuild the pieces this host owes
+  front -c config.json -listen addr [-listen addr] [-metrics addr]
+                                              S3 API over the cells and etcd
+  repair -c config.json -host name [-metrics addr]
+                                              rebuild the pieces this host owes
   scan -c config.json -host name [-age 10m]   hand long unsettled puts to this host's repair
   web -c config.json -listen addr             browse buckets and objects
 `)

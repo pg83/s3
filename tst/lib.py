@@ -110,6 +110,73 @@ def wait_port(port, timeout=10, proc=None):
     fail(f"port {port} never opened" + ("" if proc is None else f":\n{proc.text()[-2000:]}"))
 
 
+def metrics_args(port):
+    return [] if port is None else ["-metrics", f"127.0.0.1:{port}"]
+
+
+def scrape(port):
+    """The samples of one /metrics page as {(name, frozenset(labels)): value},
+    checked for the text format: each family declared once before its samples,
+    the +Inf bucket of a histogram equal to its count."""
+
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+    conn.request("GET", "/metrics")
+    resp = conn.getresponse()
+    text = resp.read().decode()
+    conn.close()
+
+    if resp.status != 200 or not resp.getheader("Content-Type", "").startswith("text/plain"):
+        fail(f"/metrics on {port}: {resp.status} {resp.getheader('Content-Type')}")
+
+    types, samples = {}, {}
+
+    for line in text.splitlines():
+        if line.startswith("# TYPE "):
+            _, _, name, kind = line.split()
+
+            if name in types:
+                fail(f"/metrics on {port}: {name} declared twice")
+
+            types[name] = kind
+
+            continue
+
+        head, value = line.rsplit(" ", 1)
+        name, _, rest = head.partition("{")
+        labels = frozenset(tuple(kv.split("=", 1)) for kv in rest.rstrip("}").split(",") if kv) if rest else frozenset()
+        family = name
+
+        for suffix in ("_bucket", "_sum", "_count"):
+            if name.endswith(suffix) and types.get(name[: -len(suffix)]) == "histogram":
+                family = name[: -len(suffix)]
+
+        if family not in types:
+            fail(f"/metrics on {port}: {name} without a TYPE")
+
+        samples[(name, labels)] = float(value)
+
+    for (name, labels), value in samples.items():
+        if name.endswith("_count") and types.get(name[:-6]) == "histogram":
+            inf = samples.get((name[:-6] + "_bucket", labels | {("le", '"+Inf"')}))
+
+            if inf != value:
+                fail(f"/metrics on {port}: {name} {dict(labels)} is {value}, its +Inf bucket {inf}")
+
+    return samples
+
+
+def metric(samples, name, **labels):
+    """The sum of the samples of a name whose labels include the given ones."""
+
+    want = {(k, f'"{v}"') for k, v in labels.items()}
+
+    return sum(v for (n, ls), v in samples.items() if n == name and want <= ls)
+
+
+def has_metric(samples, name):
+    return any(n == name for n, _ in samples)
+
+
 def ready_blocks(store):
     """Full blocks still on the SSD, waiting for the flusher: plain numbers."""
 
@@ -164,13 +231,14 @@ class Proc:
 class Cell:
     """One `s3 cell` process over a temp SSD dir and a sparse file as the HDD."""
 
-    def __init__(self, hdd_bytes, root=None, listeners=1, env=None):
+    def __init__(self, hdd_bytes, root=None, listeners=1, env=None, metrics=True):
         self.root = root or tempfile.mkdtemp(prefix="s3cell-")
         self.load = os.path.join(self.root, "load")
         self.store = os.path.join(self.root, "store")
         self.hdd = os.path.join(self.root, "hdd")
         self.ports = [free_port() for _ in range(listeners)]
         self.port = self.ports[0]
+        self.metrics = free_port() if metrics else None
         self.env = env
         self.proc = None
 
@@ -180,13 +248,18 @@ class Cell:
 
     def start(self, wait=True):
         listen = [arg for port in self.ports for arg in ("-listen", f"127.0.0.1:{port}")]
-        self.proc = Proc("cell", ["cell", "-debug", *listen, "-load", self.load, "-store", self.store, "-hdd", self.hdd], self.env).start()
+        self.proc = Proc("cell", ["cell", "-debug", *listen, "-load", self.load, "-store", self.store, "-hdd", self.hdd, *metrics_args(self.metrics)], self.env).start()
 
         if wait:
             for port in self.ports:
                 wait_port(port, proc=self.proc)
 
         return self
+
+    def scrape(self):
+        wait_port(self.metrics, proc=self.proc)
+
+        return scrape(self.metrics)
 
     def stop(self):
         return self.proc.stop()
@@ -405,17 +478,23 @@ class Front:
         self.config = config
         self.ports = [free_port() for _ in range(listeners)]
         self.port = self.ports[0]
+        self.metrics = free_port()
         self.env = env
         self.proc = None
 
     def start(self):
         listen = [arg for port in self.ports for arg in ("-listen", f"127.0.0.1:{port}")]
-        self.proc = Proc("front", ["front", "-debug", "-c", self.config, *listen], self.env).start()
+        self.proc = Proc("front", ["front", "-debug", "-c", self.config, *listen, *metrics_args(self.metrics)], self.env).start()
 
         for port in self.ports:
             wait_port(port, proc=self.proc)
 
         return self
+
+    def scrape(self):
+        wait_port(self.metrics, proc=self.proc)
+
+        return scrape(self.metrics)
 
     def stop(self):
         return self.proc.stop()
@@ -459,7 +538,15 @@ class Cluster:
         return self
 
     def repair(self, env=None):
-        return [Proc(f"repair-h{h.index}", ["repair", "-debug", "-c", self.config, "-host", f"h{h.index}"], env).start() for h in self.hosts]
+        procs = []
+
+        for h in self.hosts:
+            port = free_port()
+            proc = Proc(f"repair-h{h.index}", ["repair", "-debug", "-c", self.config, "-host", f"h{h.index}", *metrics_args(port)], env).start()
+            proc.metrics = port
+            procs.append(proc)
+
+        return procs
 
     def web(self, env=None):
         port = free_port()

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"time"
 )
 
 type Repairer struct {
@@ -14,7 +15,7 @@ type Repairer struct {
 	host  string
 }
 
-func runRepair(cfg *Config, host string) {
+func runRepair(cfg *Config, host, metrics string) {
 	if host == "" {
 		throwFmt("repair: -host is required")
 	}
@@ -35,6 +36,8 @@ func runRepair(cfg *Config, host string) {
 	r := &Repairer{store: s, host: host}
 	prefix := "repair/" + host + "/"
 
+	serveMetrics(metrics, r.gauges)
+
 	slog.Info("repair: watching the queue", "host", host, "cells", len(local))
 
 	wake := s.etcd.watch(prefix)
@@ -45,11 +48,16 @@ func runRepair(cfg *Config, host string) {
 		case <-s.up:
 		}
 
+		start := time.Now()
+
 		try(func() {
 			r.pass(prefix)
 		}).catch(func(exc *Exception) {
 			slog.Error("repair", "err", exc.error())
+			metricAdd("s3_repair_pass_errors_total", "", 1)
 		})
+
+		metricTime("s3_repair_pass_seconds", "", time.Since(start))
 	}
 }
 
@@ -66,6 +74,7 @@ func (r *Repairer) pass(prefix string) {
 
 			if !ok {
 				r.store.etcd.delIfRevision(entry.key, entry.rev)
+				fixed("malformed")
 
 				continue
 			}
@@ -74,6 +83,7 @@ func (r *Repairer) pass(prefix string) {
 				r.fix(bucket, key, entry.rev)
 			}).catch(func(exc *Exception) {
 				slog.Warn("repair", "bucket", bucket, "key", key, "err", exc.error())
+				fixed("error")
 			})
 		}
 
@@ -89,6 +99,7 @@ func (r *Repairer) fix(bucket, key string, entry int64) {
 
 		if errors.Is(err, errNoSuchKey) || (err == nil && m.Size == 0) {
 			r.drop(bucket, key, entry)
+			fixed("gone")
 
 			return
 		}
@@ -125,17 +136,20 @@ func (r *Repairer) fix(bucket, key string, entry int64) {
 
 		if !changed {
 			r.drop(bucket, key, entry)
+			fixed("sound")
 
 			return
 		}
 
 		if r.store.etcd.putIfRevision(objKey(bucket, key), throw2(json.Marshal(m)), rev) {
 			r.drop(bucket, key, entry)
+			fixed("mended")
 			slog.Info("repair: mended", "bucket", bucket, "key", key, "chunks", len(m.Chunks))
 
 			return
 		}
 
+		fixed("raced")
 		slog.Info("repair: key changed underneath, again", "bucket", bucket, "key", key)
 	}
 }
@@ -211,6 +225,17 @@ func (r *Repairer) pieceOf(key string, i int, by map[int]Piece) int {
 	}
 
 	return -1
+}
+
+func fixed(result string) {
+	metricAdd("s3_repair_fixes_total", `result="`+result+`"`, 1)
+}
+
+func (r *Repairer) gauges() []gauge {
+	return append(r.store.gauges(),
+		gauge{"s3_repair_queue_entries", "", float64(r.store.etcd.count("repair/" + r.host + "/"))},
+		gauge{"s3_repair_inprogress_entries", "", float64(r.store.etcd.count("inprogress/" + r.host + "/"))},
+	)
 }
 
 func (r *Repairer) drop(bucket, key string, entry int64) {

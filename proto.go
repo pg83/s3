@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -103,6 +104,7 @@ func (c *Cell) serve(conn net.Conn) {
 
 		if !ok {
 			slog.Warn("cell: frame without an id", "peer", conn.RemoteAddr(), "op", f.op)
+			metricAdd("s3_cell_errors_total", `op="frame"`, 1)
 
 			break
 		}
@@ -111,7 +113,7 @@ func (c *Cell) serve(conn net.Conn) {
 
 		switch f.op {
 		case opAppend:
-			c.writes <- WriteReq{id: id, data: body, out: out}
+			c.writes <- WriteReq{id: id, data: body, out: out, at: time.Now()}
 		case opCancel:
 			target, _, ok := splitId(body)
 
@@ -163,6 +165,7 @@ func (c *Cell) answer(op byte, id uint64, body []byte) reply {
 		r.op, r.body = c.handle(op, body)
 	}).catch(func(exc *Exception) {
 		slog.Warn("cell: request", "op", op, "err", exc.error())
+		metricAdd("s3_cell_errors_total", `op="`+opName(op)+`"`, 1)
 	})
 
 	return r
@@ -177,13 +180,19 @@ func (c *Cell) handle(op byte, body []byte) (byte, []byte) {
 
 		off := int64(binary.BigEndian.Uint64(body))
 		n := int64(binary.BigEndian.Uint32(body[8:]))
+		start := time.Now()
 		data, err := c.read(off, n)
 
 		if errors.Is(err, errRange) {
+			metricAdd("s3_cell_reads_total", `result="range"`, 1)
+
 			return opFail, []byte{codeRange}
 		}
 
 		throw(err)
+		metricTime("s3_cell_read_seconds", "", time.Since(start))
+		metricAdd("s3_cell_reads_total", `result="ok"`, 1)
+		metricAdd("s3_cell_read_bytes_total", "", float64(len(data)))
 
 		return op | opReply, data
 	case opStatus:
@@ -209,9 +218,11 @@ type message struct {
 	op    byte
 	body  []byte
 	reply chan outcome
+	at    time.Time
 }
 
 type Link struct {
+	id      int
 	addr    string
 	inbox   chan message
 	waiting map[uint64]message
@@ -219,8 +230,8 @@ type Link struct {
 	up      chan struct{}
 }
 
-func newLink(addr string, up chan struct{}) *Link {
-	l := &Link{addr: addr, inbox: make(chan message, inboxDepth), waiting: map[uint64]message{}, up: up}
+func newLink(id int, addr string, up chan struct{}) *Link {
+	l := &Link{id: id, addr: addr, inbox: make(chan message, inboxDepth), waiting: map[uint64]message{}, up: up}
 
 	go l.run()
 
@@ -276,6 +287,7 @@ func (l *Link) connect(again bool) net.Conn {
 			m.reply <- outcome{tag: m.tag}
 
 			delete(l.waiting, id)
+			metricAdd("s3_link_failures_total", l.labels(m.op)+`,reason="down"`, 1)
 		}
 
 		select {
@@ -349,6 +361,7 @@ func (l *Link) talk(conn net.Conn) {
 		case f := <-frames:
 			if f.op == 0 {
 				slog.Warn("link: connection lost", "cell", l.addr, "inflight", len(l.waiting))
+				metricAdd("s3_link_disconnects_total", `cell="`+strconv.Itoa(l.id)+`"`, 1)
 
 				return
 			}
@@ -365,6 +378,12 @@ func (l *Link) talk(conn net.Conn) {
 				delete(l.waiting, id)
 
 				m.reply <- outcome{tag: m.tag, op: f.op, body: body}
+
+				metricTime("s3_link_seconds", l.labels(m.op), time.Since(m.at))
+
+				if f.op == opFail {
+					metricAdd("s3_link_failures_total", l.labels(m.op)+`,reason="`+codeName(failCode(body))+`"`, 1)
+				}
 			}
 		}
 	}
@@ -384,8 +403,12 @@ func readFrames(conn net.Conn, frames chan frame) {
 	}
 }
 
+func (l *Link) labels(op byte) string {
+	return `cell="` + strconv.Itoa(l.id) + `",op="` + opName(op) + `"`
+}
+
 func (l *Link) send(tag int, op byte, body []byte, reply chan outcome) {
-	l.inbox <- message{tag: tag, op: op, body: body, reply: reply}
+	l.inbox <- message{tag: tag, op: op, body: body, reply: reply, at: time.Now()}
 }
 
 func (l *Link) cancel(reply chan outcome) {

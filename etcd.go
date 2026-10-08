@@ -79,6 +79,10 @@ func rangeOpts(prefix, from string, limit int, keysOnly bool) (string, []clientv
 	return start, opts, true
 }
 
+func (e *Etcd) count(prefix string) int64 {
+	return throw2(e.c.Get(context.Background(), prefix, clientv3.WithPrefix(), clientv3.WithCountOnly())).Count
+}
+
 func (e *Etcd) scan(prefix, from string, limit int, keysOnly bool) ([]Entry, bool) {
 	start, opts, ok := rangeOpts(prefix, from, limit, keysOnly)
 

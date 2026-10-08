@@ -116,7 +116,7 @@ func newStore(cfg *Config) *Store {
 
 		s.byHost[c.Host] = append(s.byHost[c.Host], c)
 		s.byId[c.Id] = c
-		s.links[c.Id] = newLink(c.Addr, s.up)
+		s.links[c.Id] = newLink(c.Id, c.Addr, s.up)
 	}
 
 	sort.Strings(s.hosts)
@@ -126,6 +126,16 @@ func newStore(cfg *Config) *Store {
 	}
 
 	return s
+}
+
+func (s *Store) gauges() []gauge {
+	var out []gauge
+
+	for id, l := range s.links {
+		out = append(out, gauge{"s3_link_queue_messages", `cell="` + strconv.Itoa(id) + `"`, float64(len(l.inbox))})
+	}
+
+	return out
 }
 
 func objKey(bucket, key string) string {
