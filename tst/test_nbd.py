@@ -292,6 +292,9 @@ for i, data in blocks.items():
 wait("nothing dirty", lambda: server.gauge("s3_nbd_dirty_blocks") == 0)
 if server.gauge("s3_nbd_resident_blocks") > 2:
     lib.fail(f"resident {server.gauge('s3_nbd_resident_blocks')} above the cache of two blocks")
+n.ok(CMD_TRIM, 50 * BLOCK, 8 * BLOCK)
+if server.gauge("s3_nbd_dirty_blocks") != 0:
+    lib.fail("a trim of blocks never written made them dirty")
 for i, data in blocks.items():
     expect(f"block {i} back from the bucket", n.read(i * BLOCK, BLOCK), data)
 n.write(12 * BLOCK + 5, b"abc")

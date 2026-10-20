@@ -742,13 +742,15 @@ func (d *NbdDisk) apply(p NbdPart, b *NbdBlock) {
 		copy(b.data[p.from:p.from+p.n], p.op.data[p.at:p.at+p.n])
 		d.dirtied(p.index, b)
 	case nbdCmdTrim, nbdCmdZero:
-		if p.whole() {
+		_, stored := d.committed[p.index]
+
+		if p.whole() && (stored || b.dirty) {
 			d.uncache(b)
 			b.data = nil
 			b.frozen = false
 			b.zero = true
 			d.dirtied(p.index, b)
-		} else if p.op.cmd == nbdCmdZero && b.data != nil {
+		} else if !p.whole() && p.op.cmd == nbdCmdZero && b.data != nil {
 			d.writable(p.index, b)
 			clear(b.data[p.from : p.from+p.n])
 			d.dirtied(p.index, b)
