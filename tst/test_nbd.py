@@ -5,8 +5,8 @@ commits what was written as new versions of the blocks and one map of the
 change, a restart reads the disk back from the bucket, every few commits
 the map is written whole and the older maps go, clean blocks leave memory
 and come back from the bucket, writes wait while too much is unwritten,
-and a front that does not answer fails a commit that the next tick
-repeats and a read that has to fetch."""
+a stop loses what no tick committed, and a front that does not answer
+fails a commit that the next tick repeats and a read that has to fetch."""
 
 import os
 import socket
@@ -302,9 +302,10 @@ expect("a write into a fetched block", n.read(12 * BLOCK, 16), blocks[12][:5] + 
 
 last = os.urandom(4096)
 n.write(20 * BLOCK, last)
+wait("nothing dirty", lambda: server.gauge("s3_nbd_dirty_blocks") == 0)
 n.close()
 
-# a restart commits what is left and reads the disk back
+# a restart reads the disk back from the bucket
 server.stop()
 server = Server("d1").start()
 n = Nbd(server.socket, "d1")
@@ -400,6 +401,13 @@ for i in range(3):
     n.write(i * BLOCK, os.urandom(BLOCK))
 if time.time() - start < 1:
     lib.fail(f"three blocks over a limit of two took {time.time() - start:.2f}s, without waiting for a commit")
+n.close()
+
+# what no tick committed is gone after a stop
+slow.stop()
+slow.start()
+n = Nbd(slow.socket, "d2")
+expect("written after the last commit", n.read(2 * BLOCK, 4096), b"\0" * 4096)
 n.close()
 slow.stop()
 

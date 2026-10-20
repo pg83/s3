@@ -9,10 +9,7 @@ import (
 	"time"
 )
 
-var (
-	logLevel   = new(slog.LevelVar)
-	beforeExit = func() {}
-)
+var logLevel = new(slog.LevelVar)
 
 func flags(name string) (*flag.FlagSet, *bool) {
 	fs := flag.NewFlagSet(name, flag.ExitOnError)
@@ -146,7 +143,6 @@ func exitOnSignal() {
 
 	go func() {
 		<-stop
-		beforeExit()
 		os.Exit(0)
 	}()
 }

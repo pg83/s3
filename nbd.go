@@ -152,9 +152,6 @@ type NbdDisk struct {
 	fetched   chan NbdFetch
 	commits   chan *NbdJob
 	stats     chan chan NbdStats
-	closing   chan chan struct{}
-	closed    chan struct{}
-	stopping  bool
 	working   bool
 }
 
@@ -178,12 +175,9 @@ func runNbd(endpoint, bucket, name string, size int64, socket string, tick time.
 		fetched:   make(chan NbdFetch),
 		commits:   make(chan *NbdJob),
 		stats:     make(chan chan NbdStats),
-		closing:   make(chan chan struct{}),
 	}
 
 	d.load()
-
-	beforeExit = d.shutdown
 
 	serveMetrics(metrics, d.gauges)
 
@@ -558,7 +552,7 @@ func (d *NbdDisk) run(tick time.Duration) {
 		for {
 			ops := d.ops
 
-			if d.stopping || len(d.dirty) >= d.dirtyMax {
+			if len(d.dirty) >= d.dirtyMax {
 				ops = nil
 			}
 
@@ -573,31 +567,12 @@ func (d *NbdDisk) run(tick time.Duration) {
 				d.commit()
 			case out := <-d.stats:
 				out <- NbdStats{dirty: len(d.dirty), resident: d.lru.Len() + len(d.dirty), gen: d.gen}
-			case done := <-d.closing:
-				d.stopping = true
-				d.closed = done
-				d.commit()
-				d.finish()
 			}
 		}
 	}).catch(func(exc *Exception) {
 		slog.Error("nbd: disk", "err", exc.error())
 		os.Exit(1)
 	})
-}
-
-func (d *NbdDisk) shutdown() {
-	done := make(chan struct{})
-
-	d.closing <- done
-	<-done
-}
-
-func (d *NbdDisk) finish() {
-	if d.stopping && !d.working && len(d.dirty) == 0 && d.closed != nil {
-		close(d.closed)
-		d.closed = nil
-	}
 }
 
 func (d *NbdDisk) gauges() []gauge {
@@ -949,8 +924,6 @@ func (d *NbdDisk) settle(job *NbdJob) {
 			}
 		}
 
-		d.finish()
-
 		return
 	}
 
@@ -1002,8 +975,6 @@ func (d *NbdDisk) settle(job *NbdJob) {
 	slog.Debug("nbd: commit", "gen", job.gen, "blocks", len(job.items), "base", job.base != nil, "took", job.took)
 
 	go d.bucket.deleteAll(stale)
-
-	d.finish()
 }
 
 type BucketClient struct {
