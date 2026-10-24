@@ -15,12 +15,13 @@ import (
 )
 
 var faults = map[string]error{
-	"accept":     syscall.EMFILE,
-	"cell read":  syscall.ECONNRESET,
-	"cell write": syscall.EPIPE,
-	"dial":       syscall.EHOSTUNREACH,
-	"link read":  syscall.EIO,
-	"link write": syscall.EPIPE,
+	"accept":      syscall.EMFILE,
+	"cell read":   syscall.ECONNRESET,
+	"cell write":  syscall.EPIPE,
+	"dial":        syscall.EHOSTUNREACH,
+	"link read":   syscall.EIO,
+	"link write":  syscall.EPIPE,
+	"load rename": syscall.ENOSPC,
 }
 
 func armChaos() {
@@ -130,6 +131,14 @@ func (c *Chaos) dial(network, address string, timeout time.Duration) (net.Conn, 
 	}
 
 	return c.OS.dial(network, address, timeout)
+}
+
+func (c *Chaos) rename(oldpath, newpath string) error {
+	if err := c.failing("load rename"); err != nil {
+		return err
+	}
+
+	return c.OS.rename(oldpath, newpath)
 }
 
 func (c *Chaos) accepts(ln net.Listener) net.Listener {

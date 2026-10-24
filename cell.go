@@ -547,6 +547,10 @@ func (c *Cell) open(l *loaded, buf []byte, num int64) *os.File {
 		err := os.WriteFile(tmp, buf, 0o644)
 
 		if err == nil {
+			err = sys.rename(tmp, c.loadPath(num))
+		}
+
+		if err == nil {
 			break
 		}
 
@@ -564,8 +568,6 @@ func (c *Cell) open(l *loaded, buf []byte, num int64) *os.File {
 		throw(os.Remove(c.loadPath(old)))
 		metricAdd("s3_cell_lru_evictions_total", "", 1)
 	}
-
-	throw(os.Rename(tmp, c.loadPath(num)))
 
 	l.byNum[num] = l.order.PushFront(num)
 
