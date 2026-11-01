@@ -39,6 +39,9 @@ GO_SOURCES = [
 ]
 GO_INPUTS = [
     *GO_SOURCES,
+    "$(S)/cluster.html",
+    "$(S)/cluster.css",
+    "$(S)/cluster.js",
     "$(S)/go.mod",
     "$(S)/go.sum",
 ]

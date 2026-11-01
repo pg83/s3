@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>s3 · cluster</title>
+<link rel="stylesheet" href="/cluster.css">
+</head>
+<body>
+<aside class="sidebar" aria-label="Navigation">
+ <a class="logo" href="#cluster" aria-label="s3 cluster"><span class="logo-icon" aria-hidden="true">s<span>↗</span></span>s3</a>
+ <nav aria-label="Views">
+  <button class="active" data-view="cluster" aria-current="page">Cluster </button>
+  <button data-view="buckets">Buckets </button>
+ </nav>
+ <div class="filters" id="filters"><div class="rail-label">Highlight</div>
+  <button class="filter selected" data-filter="all" aria-pressed="true"><span class="dot blue"></span>All volumes<span class="count">—</span></button>
+  <button class="filter" data-filter="attention" aria-pressed="false"><span class="dot warn"></span>Attention<span class="count">—</span></button>
+  <button class="filter" data-filter="healthy" aria-pressed="false"><span class="dot"></span>Healthy<span class="count">—</span></button>
+ </div>
+ <div class="sidebar-foot"><span class="snapshot"><span class="dot blue" id="connection-dot"></span><span id="connection" role="status">Loading</span></span><time id="rail-time"></time><div class="sidebar-theme"><button class="icon-button" id="theme" aria-label="Switch color theme" title="Switch color theme"><svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M13.4 9.1A5.6 5.6 0 0 1 6.9 2.6a5.5 5.5 0 1 0 6.5 6.5Z" stroke="currentColor" stroke-width="1.2"/></svg></button><span>Theme</span></div></div>
+</aside>
+<main><div class="page">
+ <section id="cluster-view" aria-label="Cluster status">
+  <div class="loading" id="load-error" role="status">Loading cluster…</div>
+  <div class="summary" id="summary" hidden></div>
+  <div class="matrix-scroll"><div class="matrix" id="matrix"></div></div>
+ </section>
+
+</div></main>
+<div class="backdrop" id="backdrop"></div>
+<aside class="drawer" id="drawer" role="dialog" aria-modal="true" aria-label="Disk details" inert><div class="drawer-head"><div><div class="drawer-crumb" id="drawer-crumb"></div><h2 id="drawer-title"></h2><div class="drawer-model" id="drawer-model"></div></div><button class="icon-button" id="close-drawer" aria-label="Close disk details"><svg width="13" height="13" viewBox="0 0 14 14" fill="none"><path d="m3 3 8 8M11 3l-8 8" stroke="currentColor" stroke-width="1.2"/></svg></button></div><div id="drawer-content"></div></aside>
+<script src="/cluster.js" defer></script>
+</body>
+</html>

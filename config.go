@@ -13,9 +13,10 @@ type CellSpec struct {
 }
 
 type Config struct {
-	Etcd    []string   `json:"etcd"`
-	Buckets []string   `json:"buckets"`
-	Cells   []CellSpec `json:"cells"`
+	Etcd      []string         `json:"etcd"`
+	Buckets   []string         `json:"buckets"`
+	Cells     []CellSpec       `json:"cells"`
+	Dashboard *DashboardConfig `json:"dashboard,omitempty"`
 }
 
 func loadConfig(path string) *Config {

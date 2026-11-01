@@ -26,8 +26,8 @@ an etcd for the names.
 - **S3 for the usual clients:** put, get, head, delete, ranges,
   listings, multi-object delete, the SDKs' chunked uploads. The ETag
   is the md5.
-- **A browser:** `s3 web` walks the buckets and shows every object's
-  size, time, md5 and whether all of its pieces are in place.
+- **A browser:** `s3 web` shows the cluster's disks, SSD partitions,
+  capacity, activity and health, and walks the buckets and objects.
 
 ## Building
 
@@ -99,11 +99,34 @@ to that host's repair.
 
 ### Browser
 
-`s3 web` is read-only: `/` lists the buckets, `/b/<bucket>?prefix=`
-walks a bucket folder by folder, 500 entries a page, and
+`s3 web` is read-only: `/` shows the cluster matrix, `/buckets` lists
+the buckets, `/b/<bucket>?prefix=` walks a bucket folder by folder, 500 entries a page, and
 `/o/<bucket>/<key>` fetches an object the way the front does. An
 object with a piece still owed is marked until its host has paid.
-The page is a snapshot; it does not refresh.
+The cluster view refreshes every 30 seconds. Bucket listings are snapshots.
+
+The optional `dashboard` configuration supplies a Prometheus URL and
+the S3 metadata etcd job (default `etcd_2`):
+
+```json
+"dashboard": {"prometheus": "http://127.0.0.1:8030", "etcd_job": "etcd_2"}
+```
+
+Prometheus must retain the `host` label and cell jobs named `s3_cell_0`,
+`s3_cell_1`, etc., in cell-ID order on each host. The dashboard also reads
+`smart_device_*`, `smart_ata_attribute_raw_value`, etcd metrics, and
+`s3_volume_*` from the lab's volume textfile collector. Volume labels
+identify `role` (`hdd`, `store`, `load`, `etcd`), `cell_index` (`-1` for
+etcd), `device`, parent `disk` and `mount`. The collector publishes
+filesystem capacity, used/free bytes, collection time, filesystem scrape
+success and per-partition read/write counters.
+
+Partition usage comes from the mounted filesystem. SSD history shows
+cached or queued payload; the etcd history shows database size. A full
+LOAD partition is a normal LRU cache, not a low-space warning. SMART
+describes the physical disk. Missing metrics are shown as unavailable;
+if Prometheus fails, the last successful snapshot is marked stale.
+The API at `/api/cluster` serves the same cached data to all browsers.
 
 ### Metrics
 

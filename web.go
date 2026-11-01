@@ -92,7 +92,8 @@ td.number.short{color:var(--warn)}
 <aside class="sidebar" aria-label="Navigation">
   <a class="logo" href="/" aria-label="s3 buckets"><span class="logo-icon" aria-hidden="true">s<span>↗</span></span>s3</a>
   <nav aria-label="Views">
-    <a href="/"{{if eq .Page "buckets"}} class="active" aria-current="page"{{end}}>Buckets{{if eq .Page "buckets"}} <span class="nav-count">{{len .Buckets}}</span>{{end}}</a>
+    <a href="/">Cluster</a>
+    <a href="/buckets"{{if eq .Page "buckets"}} class="active" aria-current="page"{{end}}>Buckets{{if eq .Page "buckets"}} <span class="nav-count">{{len .Buckets}}</span>{{end}}</a>
   </nav>
   {{if eq .Page "bucket"}}
   <div class="kinds" aria-label="Filter entries">
@@ -123,7 +124,7 @@ td.number.short{color:var(--warn)}
     </tbody>
   </table>
   {{else}}
-  <div class="crumbs"><a href="/">Buckets</a>{{range .Crumbs}}<span class="sep">/</span>{{if .URL}}<a href="{{.URL}}">{{.Name}}</a>{{else}}<span class="cur">{{.Name}}</span>{{end}}{{end}}</div>
+  <div class="crumbs"><a href="/buckets">Buckets</a>{{range .Crumbs}}<span class="sep">/</span>{{if .URL}}<a href="{{.URL}}">{{.Name}}</a>{{else}}<span class="cur">{{.Name}}</span>{{end}}{{end}}</div>
   <table aria-label="Entries">
     <colgroup><col class="name"><col class="size"><col class="time"><col class="md5"><col class="pieces"></colgroup>
     <thead><tr><th scope="col">Name</th><th scope="col" class="number">Size</th><th scope="col" class="number">Modified</th><th scope="col">MD5</th><th scope="col" class="number">Pieces</th></tr></thead>
@@ -185,7 +186,8 @@ td.number.short{color:var(--warn)}
 const pageLimit = 500
 
 type Web struct {
-	store *Store
+	store     *Store
+	dashboard *Dashboard
 }
 
 type WebBucket struct {
@@ -227,7 +229,7 @@ func runWeb(cfg *Config, listen string) {
 		throwFmt("web: -listen is required")
 	}
 
-	w := &Web{store: newStore(cfg)}
+	w := &Web{store: newStore(cfg), dashboard: newDashboard(cfg)}
 	ln := sys.accepts(throw2(net.Listen("tcp", listen)))
 
 	slog.Info("web: serving", "listen", listen)
@@ -238,6 +240,20 @@ func runWeb(cfg *Config, listen string) {
 func (wb *Web) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.URL.Path == "/":
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write([]byte(clusterHTML))
+	case r.URL.Path == "/cluster.css":
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write([]byte(clusterCSS))
+	case r.URL.Path == "/cluster.js":
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-cache")
+		_, _ = w.Write([]byte(clusterJS))
+	case r.URL.Path == "/api/cluster":
+		wb.dashboard.serve(w, r)
+	case r.URL.Path == "/buckets":
 		wb.page(w, r, wb.buckets)
 	case strings.HasPrefix(r.URL.Path, "/b/"):
 		wb.page(w, r, wb.bucket)
