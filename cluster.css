@@ -46,3 +46,4 @@ main{flex:1;min-width:0;height:100dvh;overflow:auto;scrollbar-color:var(--rule) 
 
 
 .loading{padding:28px 0;font:11px var(--mono);color:var(--muted)}.connection-stale .snapshot{color:var(--warn)}.connection-stale #connection-dot{background:var(--warn)}
+.summary-coverage{color:var(--warn);text-transform:none;letter-spacing:0;white-space:nowrap}
