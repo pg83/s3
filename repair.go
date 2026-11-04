@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"math/rand"
 	"net"
 	"strings"
 	"time"
@@ -188,13 +189,7 @@ func (r *Repairer) mend(bucket, key string, c *chunkState, mine int, chunk *Chun
 	}
 
 	if !bytes.Equal(c.have[mine], pieces[mine]) {
-		pl := r.store.newPlacer(map[int]string{mine: r.host})
-
-		pl.passDown = true
-		pl.add(mine, pieces[mine])
-		pl.wait(nil, 1)
-
-		p, ok := pl.placed[mine]
+		p, ok := r.place(mine, pieces[mine])
 
 		if !ok {
 			throwFmt("repair: %s/%s: no cell of %s took the piece", bucket, key, r.host)
@@ -219,6 +214,28 @@ func (r *Repairer) mend(bucket, key string, c *chunkState, mine int, chunk *Chun
 	}
 
 	return changed
+}
+
+func (r *Repairer) place(piece int, data []byte) (Piece, bool) {
+	cells := append([]CellSpec(nil), r.store.byHost[r.host]...)
+
+	rand.Shuffle(len(cells), func(a, b int) { cells[a], cells[b] = cells[b], cells[a] })
+
+	reply := make(chan outcome, 1)
+
+	for _, c := range cells {
+		r.store.links[c.Id].send(piece, opAppend, data, reply)
+
+		offset, err := appended(<-reply)
+
+		if err == nil {
+			return Piece{Piece: piece, Cell: c.Id, Offset: offset, Xxh: xxhHex(data)}, true
+		}
+
+		slog.Warn("repair: append", "cell", c.Id, "err", err)
+	}
+
+	return Piece{}, false
 }
 
 func (r *Repairer) pieceOf(key string, i int, by map[int]Piece) int {
