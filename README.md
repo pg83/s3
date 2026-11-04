@@ -83,7 +83,9 @@ front's memory whole, thirty two at a time; the rest wait.
 One `s3 repair` per host, `-host` being the host's name in the
 config. It watches the host's queue in etcd and writes every piece the
 host owes into the host's own cells, which it reaches over loopback
-only; it refuses a config that puts them anywhere else. A host that
+only; it refuses a config that puts them anywhere else. A put gives
+up on a host whose cell it drew is down and leaves the piece owed; the
+repair tries the host's other cells before it gives up. A host that
 stays down keeps its queue until it returns; nobody repairs on its
 behalf. `-rate` caps the bytes a second it reads from the cells of
 other hosts: after reading the pieces of an object it sleeps until

@@ -190,6 +190,7 @@ func (r *Repairer) mend(bucket, key string, c *chunkState, mine int, chunk *Chun
 	if !bytes.Equal(c.have[mine], pieces[mine]) {
 		pl := r.store.newPlacer(map[int]string{mine: r.host})
 
+		pl.passDown = true
 		pl.add(mine, pieces[mine])
 		pl.wait(nil, 1)
 

@@ -224,12 +224,13 @@ type placing struct {
 }
 
 type placer struct {
-	store   *Store
-	pieces  map[int][]byte
-	plan    map[int]*placing
-	placed  map[int]Piece
-	reply   chan outcome
-	pending int
+	store    *Store
+	pieces   map[int][]byte
+	plan     map[int]*placing
+	placed   map[int]Piece
+	reply    chan outcome
+	pending  int
+	passDown bool
 }
 
 func (s *Store) newPlacer(hosts map[int]string) *placer {
@@ -281,7 +282,7 @@ func (p *placer) take(o outcome) {
 
 	slog.Warn("store: append", "cell", p.plan[o.tag].cell, "err", err)
 
-	if errors.Is(err, errFull) && p.offer(o.tag) {
+	if (errors.Is(err, errFull) || (p.passDown && errors.Is(err, errLinkDown))) && p.offer(o.tag) {
 		p.pending++
 	}
 }
