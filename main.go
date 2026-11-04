@@ -89,9 +89,18 @@ func main() {
 			config := fs.String("c", "", "config file")
 			host := fs.String("host", "", "name of this host in the config")
 			metrics := metricsFlag(fs)
+			rate := int64(0)
+
+			fs.Func("rate", "bytes per second read from the cells of other hosts, e.g. 50M; none by default", func(text string) error {
+				v, err := parseSize(text)
+
+				rate = v
+
+				return err
+			})
 
 			parse(fs, debug)
-			runRepair(loadConfig(*config), *host, *metrics)
+			runRepair(loadConfig(*config), *host, rate, *metrics)
 		case "nbd":
 			fs, debug := flags("nbd")
 			endpoint := fs.String("endpoint", "", "S3 endpoint of a front, e.g. http://127.0.0.1:8093")
@@ -155,7 +164,7 @@ Commands:
                                               append-only log on one disk
   front -c config.json -listen addr [-listen addr] [-metrics addr]
                                               S3 API over the cells and etcd
-  repair -c config.json -host name [-metrics addr]
+  repair -c config.json -host name [-rate 50M] [-metrics addr]
                                               rebuild the pieces this host owes
   scan -c config.json -host name [-age 10m]   hand long unsettled puts to this host's repair
   nbd -endpoint url -bucket name -disk name -size 4T -socket path [-tick 10s] [-cache 1G] [-dirty 4G] [-metrics addr]

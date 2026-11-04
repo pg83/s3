@@ -46,7 +46,7 @@ an etcd every host reaches, and a config file on every host.
 ```
 s3 cell -listen addr [-listen addr] -load dir -store dir -hdd device [-metrics addr]
 s3 front -c config.json -listen addr [-listen addr] [-metrics addr]
-s3 repair -c config.json -host name [-metrics addr]
+s3 repair -c config.json -host name [-rate 50M] [-metrics addr]
 s3 scan -c config.json -host name [-age 10m]
 s3 web -c config.json -listen addr
 ```
@@ -85,7 +85,10 @@ config. It watches the host's queue in etcd and writes every piece the
 host owes into the host's own cells, which it reaches over loopback
 only; it refuses a config that puts them anywhere else. A host that
 stays down keeps its queue until it returns; nobody repairs on its
-behalf.
+behalf. `-rate` caps the bytes a second it reads from the cells of
+other hosts: after reading the pieces of an object it sleeps until
+what it fetched is paid for at that rate. Without it the repair reads
+as fast as the network goes.
 
 ### Scan
 
@@ -151,7 +154,9 @@ started; gauges are computed when the page is asked for.
   its reply), `s3_link_failures_total{cell,op,reason}`,
   `s3_link_disconnects_total{cell}`, `s3_link_queue_messages{cell}`.
 - repair: `s3_repair_fixes_total{result}`, `s3_repair_pass_seconds`,
-  `s3_repair_pass_errors_total`; gauges: the entries of its repair queue
+  `s3_repair_pass_errors_total`, `s3_repair_network_bytes_total` (read
+  from the cells of other hosts), `s3_repair_paused_seconds_total`
+  (slept to hold `-rate`); gauges: the entries of its repair queue
   and the unsettled puts marked for its host.
 
 ### Configuration
