@@ -72,7 +72,6 @@ if r.returncode != 1 or "no cells of host nope" not in r.stderr:
     lib.fail(f"repair of a host that is not there: rc={r.returncode} stderr={r.stderr!r}")
 
 for args, want in (
-    (("keeper", "-c", cfg, "-every", "0s"), "-every must be positive"),
     (("keeper", "-c", cfg, "-full", "1.5"), "-full is a share of a disk"),
     (("keeper", "-c", cfg, "-full", "0"), "-full is a share of a disk"),
     (("cell", "-batch", "lots"), "invalid value"),

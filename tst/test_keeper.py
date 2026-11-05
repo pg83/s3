@@ -1,7 +1,7 @@
-"""Of two keepers one holds the lock and the other waits for it. The one
-holding it queues the compaction of every cell filled past -full, one
-cell at a time, never two keys at once; killed, it hands the lock over
-and the other goes on. While a cell is down nothing is queued."""
+"""The keeper, run again and again as cron would, queues the compaction
+of every cell filled past -full, the fullest first, one cell at a time
+and never two keys at once; it leaves the cells alone while a rebuild
+runs and while a cell is down, and says so."""
 
 import os
 import threading
@@ -73,6 +73,15 @@ def settled():
     return not etcd.scan("inprogress/") and not etcd.scan("repair/")
 
 
+def keeper():
+    r = cluster.run("keeper", "-full", "0.5")
+
+    if r.returncode != 0:
+        lib.fail(f"keeper: rc={r.returncode} {r.stderr!r}")
+
+    return r.stderr
+
+
 # every cell past half its disk, most of it garbage
 blobs = {}
 n = 0
@@ -99,36 +108,52 @@ for c in cells:
     c.supervise()
 
 # no key ever has company
-seen, most, watching = set(), [0], [True]
+seen, most, watching = [], [0], [True]
 
 
 def watch():
     while watching[0]:
-        keys = etcd.scan("rebuild/")
+        try:
+            keys = etcd.scan("rebuild/")
+        except OSError:
+            return
+
         most[0] = max(most[0], len(keys))
-        seen.update(keys)
+
+        for k in keys:
+            if k not in seen:
+                seen.append(k)
+
         time.sleep(0.01)
 
 
 threading.Thread(target=watch, daemon=True).start()
 
-first = cluster.keeper("-every", "300ms", "-full", "0.5")
-wait("a leader", lambda: "keeper: leading" in first.text())
-second = cluster.keeper("-every", "300ms", "-full", "0.5")
-wait("the second keeper", lambda: "keeper: waiting for the lock" in second.text())
+# the first round queues the fullest cell, the next one leaves it be
+now = heads()
+fullest = max(range(6), key=lambda i: (now[i], -i))
+out = keeper()
 
-wait("the first rebuild", lambda: len(seen) >= 1 and not etcd.scan("rebuild/"), timeout=120)
+if "queued a compaction" not in out or not etcd.has(f"rebuild/{fullest}"):
+    lib.fail(f"the first round queued {sorted(etcd.scan('rebuild/'))}, not cell {fullest}: {out!r}")
 
-if "keeper: leading" in second.text():
-    lib.fail("two keepers lead at once")
+if "a rebuild is under way" not in keeper():
+    lib.fail("a round during a rebuild did not leave it alone")
 
-first.stop()
-wait("the second keeper to lead", lambda: "keeper: leading" in second.text(), timeout=60)
-wait("every cell compacted", lambda: not etcd.scan("rebuild/") and below(0.5), timeout=300)
-wait("a round with nothing to do", lambda: "no cell is full enough" in second.text(), timeout=30)
+deadline = time.time() + 300
 
-if most[0] != 1 or seen != {f"rebuild/{i}" for i in range(6)}:
-    lib.fail(f"rebuilds: {sorted(seen)}, at most {most[0]} at once")
+while not (below(0.5) and not etcd.scan("rebuild/")):
+    if time.time() > deadline:
+        lib.fail(f"cells never compacted: {heads()}, queued {seen}")
+
+    keeper()
+    time.sleep(0.2)
+
+if most[0] != 1 or sorted(seen) != [f"rebuild/{i}" for i in range(6)]:
+    lib.fail(f"rebuilds: {seen}, at most {most[0]} at once")
+
+if "no cell is full enough" not in keeper():
+    lib.fail("a round with every cell compacted did something")
 
 for key, data in blobs.items():
     status, _, body = s3.request("GET", "/k/" + key)
@@ -150,15 +175,20 @@ while below(0.6, skip=(5,)):
     if n > 400:
         lib.fail(f"cells never filled again: {heads()}")
 
-wait("the keeper to see the cell down", lambda: second.text().count("a cell is down") >= 3)
+for _ in range(3):
+    if "a cell is down" not in keeper():
+        lib.fail("a round with a cell down did not say so")
 
 if seen:
-    lib.fail(f"queued with a cell down: {sorted(seen)}")
+    lib.fail(f"queued with a cell down: {seen}")
 
 down.supervise()
-wait("a rebuild after the cell is back", lambda: len(seen) >= 1, timeout=60)
-wait("the rebuild", lambda: not etcd.scan("rebuild/"), timeout=120)
+lib.wait_port(down.port, timeout=30)
 
+if "queued a compaction" not in keeper():
+    lib.fail("nothing queued once the cell was back")
+
+wait("the rebuild", lambda: seen and not etcd.scan("rebuild/"), timeout=120)
 watching[0] = False
 
 for key, data in blobs.items():

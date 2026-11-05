@@ -351,9 +351,20 @@ class Cell:
         self.proc.kill()
 
     def pause(self):
-        """SIGSTOP: the cell keeps its connections and answers nothing."""
+        """SIGSTOP: the cell keeps its connections and answers nothing.
+        Returns once the process is stopped, not merely signalled."""
 
-        os.kill(self.proc.proc.pid, signal.SIGSTOP)
+        pid = self.proc.proc.pid
+        os.kill(pid, signal.SIGSTOP)
+
+        while True:
+            with open(f"/proc/{pid}/stat") as f:
+                state = f.read().rsplit(")", 1)[1].split()[0]
+
+            if state in ("T", "t", "Z"):
+                return
+
+            time.sleep(0.001)
 
     def resume(self):
         os.kill(self.proc.proc.pid, signal.SIGCONT)
@@ -690,9 +701,6 @@ class Cluster:
         """A one-shot command over the cluster's config: s3 <cmd> -c config <args>."""
 
         return run(args[0], "-c", self.config, *args[1:])
-
-    def keeper(self, *args, env=None):
-        return Proc("keeper", ["keeper", "-debug", "-c", self.config, *args], env).start()
 
     def live(self, cell_id):
         """The bytes of the pieces the manifests place on a cell."""

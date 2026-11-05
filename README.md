@@ -48,7 +48,7 @@ s3 cell -listen addr [-listen addr] -load dir -store dir -hdd device [-c config.
 s3 front -c config.json -listen addr [-listen addr] [-metrics addr]
 s3 repair -c config.json -host name [-rate 50M] [-metrics addr]
 s3 scan -c config.json -host name [-age 10m]
-s3 keeper -c config.json [-every 10m] [-full 0.75]
+s3 keeper -c config.json [-full 0.75]
 s3 compact -c config.json [cell]
 s3 web -c config.json -listen addr
 ```
@@ -112,10 +112,11 @@ log is caught by the hash on its next read and mended by the repair.
 
 ### Keeper
 
-`s3 keeper` runs on every host; one holds a lock in etcd and the
-others wait for it. Every `-every` it asks every cell how full it is,
-and queues the fullest past `-full` of its disk, unless a rebuild is
-under way or a cell is down.
+`s3 keeper` runs once and exits; run it from cron every ten minutes or
+so, from one place at a time, with a timeout: a cell that holds its
+connection and says nothing keeps it waiting. It asks every cell how
+full it is and queues the fullest past `-full` of its disk, unless a
+rebuild is under way or a cell is down.
 
 ### Compact
 

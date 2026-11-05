@@ -1,22 +1,13 @@
 package main
 
 import (
-	"context"
 	"encoding/binary"
 	"fmt"
 	"log/slog"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-
-	"go.etcd.io/etcd/client/v3/concurrency"
-)
-
-const (
-	keeperLock = "lock/keeper"
-	keeperTTL  = 10
 )
 
 type cellStatus struct {
@@ -25,38 +16,12 @@ type cellStatus struct {
 	ok   bool
 }
 
-func runKeeper(cfg *Config, every time.Duration, full float64) {
-	if every <= 0 {
-		throwFmt("keeper: -every must be positive")
-	}
-
+func runKeeper(cfg *Config, full float64) {
 	if full <= 0 || full > 1 {
 		throwFmt("keeper: -full is a share of a disk, above 0 and at most 1")
 	}
 
-	s := newStore(cfg)
-	session := throw2(concurrency.NewSession(s.etcd.c, concurrency.WithTTL(keeperTTL)))
-	lock := concurrency.NewMutex(session, keeperLock)
-
-	slog.Info("keeper: waiting for the lock")
-	throw(lock.Lock(context.Background()))
-	slog.Info("keeper: leading", "every", every, "full", full)
-
-	go func() {
-		<-session.Done()
-		slog.Error("keeper: lost the lock")
-		os.Exit(1)
-	}()
-
-	for {
-		try(func() {
-			keep(s, cfg, full)
-		}).catch(func(exc *Exception) {
-			slog.Warn("keeper", "err", exc.error())
-		})
-
-		time.Sleep(every)
-	}
+	keep(newStore(cfg), cfg, full)
 }
 
 func keep(s *Store, cfg *Config, full float64) {
@@ -92,7 +57,7 @@ func keep(s *Store, cfg *Config, full float64) {
 	}
 
 	if best < 0 {
-		slog.Debug("keeper: no cell is full enough to compact")
+		slog.Info("keeper: no cell is full enough to compact")
 
 		return
 	}
