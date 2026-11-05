@@ -17,6 +17,18 @@ func flags(name string) (*flag.FlagSet, *bool) {
 	return fs, fs.Bool("debug", false, "log the timing of every tick, flush, put and get")
 }
 
+func sizeFlag(fs *flag.FlagSet, name string, value int64, usage string) *int64 {
+	fs.Func(name, usage, func(text string) error {
+		v, err := parseSize(text)
+
+		value = v
+
+		return err
+	})
+
+	return &value
+}
+
 func metricsFlag(fs *flag.FlagSet) *string {
 	return fs.String("metrics", "", "address to serve Prometheus metrics on, e.g. 127.0.0.1:9100")
 }
@@ -57,10 +69,21 @@ func main() {
 			load := fs.String("load", "", "directory on the SSD for blocks being read")
 			store := fs.String("store", "", "directory on the SSD for blocks being written")
 			hdd := fs.String("hdd", "", "raw block device for the log")
+			config := fs.String("c", "", "config file; with it the cell is rebuilt when it is queued")
+			id := fs.Int("id", -1, "id of this cell in the config")
+			rate := sizeFlag(fs, "rate", 0, "bytes per second a rebuild reads from the cells of other hosts, e.g. 50M; none by default")
+			batch := sizeFlag(fs, "batch", 64<<20, "bytes a rebuild writes between two updates of the keys")
 			metrics := metricsFlag(fs)
 
 			parse(fs, debug)
-			runCell(listen, *load, *store, *hdd, *metrics)
+
+			var cfg *Config
+
+			if *config != "" {
+				cfg = loadConfig(*config)
+			}
+
+			runCell(listen, *load, *store, *hdd, *metrics, cfg, *id, *rate, *batch)
 		case "front":
 			fs, debug := flags("front")
 			config := fs.String("c", "", "config file")
@@ -89,18 +112,24 @@ func main() {
 			config := fs.String("c", "", "config file")
 			host := fs.String("host", "", "name of this host in the config")
 			metrics := metricsFlag(fs)
-			rate := int64(0)
-
-			fs.Func("rate", "bytes per second read from the cells of other hosts, e.g. 50M; none by default", func(text string) error {
-				v, err := parseSize(text)
-
-				rate = v
-
-				return err
-			})
+			rate := sizeFlag(fs, "rate", 0, "bytes per second read from the cells of other hosts, e.g. 50M; none by default")
 
 			parse(fs, debug)
-			runRepair(loadConfig(*config), *host, rate, *metrics)
+			runRepair(loadConfig(*config), *host, *rate, *metrics)
+		case "keeper":
+			fs, debug := flags("keeper")
+			config := fs.String("c", "", "config file")
+			every := fs.Duration("every", 10*time.Minute, "how often the cells are looked at")
+			full := fs.Float64("full", 0.75, "share of a disk past which its cell is compacted")
+
+			parse(fs, debug)
+			runKeeper(loadConfig(*config), *every, *full)
+		case "compact":
+			fs, debug := flags("compact")
+			config := fs.String("c", "", "config file")
+
+			parse(fs, debug)
+			runCompact(loadConfig(*config), fs.Args())
 		case "nbd":
 			fs, debug := flags("nbd")
 			endpoint := fs.String("endpoint", "", "S3 endpoint of a front, e.g. http://127.0.0.1:8093")
@@ -160,13 +189,16 @@ func printUsage() {
 	os.Stderr.WriteString(`Usage: s3 command [flags]
 
 Commands:
-  cell -listen addr [-listen addr] -load dir -store dir -hdd device [-metrics addr]
+  cell -listen addr [-listen addr] -load dir -store dir -hdd device [-c config.json -id n] [-rate 50M] [-batch 64M] [-metrics addr]
                                               append-only log on one disk
   front -c config.json -listen addr [-listen addr] [-metrics addr]
                                               S3 API over the cells and etcd
   repair -c config.json -host name [-rate 50M] [-metrics addr]
                                               rebuild the pieces this host owes
   scan -c config.json -host name [-age 10m]   hand long unsettled puts to this host's repair
+  keeper -c config.json [-every 10m] [-full 0.75]
+                                              queue the compaction of a cell whose disk fills up
+  compact -c config.json [cell]               list the cells being rebuilt, or queue one, by id or as host/index
   nbd -endpoint url -bucket name -disk name -size 4T -socket path [-tick 10s] [-cache 1G] [-dirty 4G] [-metrics addr]
                                               a block device over a bucket, served as NBD
   web -c config.json -listen addr             browse buckets and objects

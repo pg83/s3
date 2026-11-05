@@ -13,6 +13,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 
@@ -25,6 +26,7 @@ OP_REPLY, OP_FAIL = 0x80, 0xff
 CODE_FULL, CODE_RANGE, CODE_IO, CODE_CANCELLED = 1, 2, 3, 4
 
 PROCS = []
+SUPERVISED = []
 
 
 def environment(overrides):
@@ -70,6 +72,9 @@ def keep_logs():
 
 
 def stop_all():
+    for c in SUPERVISED:
+        c.supervising = False
+
     for p in reversed(PROCS):
         try:
             p.stop()
@@ -214,6 +219,7 @@ class Proc:
         self.env = env
         self.log = os.path.join(LAB, self.name + ".log")
         self.proc = None
+        self.coverdir = None
 
     def start(self):
         env = environment(self.env)
@@ -221,6 +227,7 @@ class Proc:
         if env.get("GOCOVERDIR"):
             env["GOCOVERDIR"] = os.path.join(env["GOCOVERDIR"], self.name + "-" + uuid.uuid4().hex)
             os.makedirs(env["GOCOVERDIR"])
+            self.coverdir = env["GOCOVERDIR"]
 
         with open(self.log, "ab") as log:
             self.proc = subprocess.Popen([BINARY, *self.args], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log, env=env)
@@ -238,6 +245,16 @@ class Proc:
 
     def wait_exit(self, timeout=10):
         return self.proc.wait(timeout=timeout)
+
+    def kill(self):
+        """SIGKILL: the process writes no coverage counters, so it leaves
+        no directory of them behind either."""
+
+        self.proc.kill()
+        self.proc.wait(timeout=10)
+
+        if self.coverdir:
+            shutil.rmtree(self.coverdir, ignore_errors=True)
 
     def text(self):
         with open(self.log, errors="replace") as f:
@@ -257,6 +274,15 @@ class Cell:
         self.metrics = free_port() if metrics else None
         self.env = env
         self.proc = None
+        # the cluster's config and the cell's id in it, for the cell to be
+        # rebuilt when queued; extra flags a scenario adds (-batch, -rate)
+        self.config = None
+        self.id = None
+        self.extra = []
+        self.supervising = False
+        self.starts = 0
+        self.hold = threading.Event()
+        self.held = threading.Event()
 
         if not os.path.exists(self.hdd):
             with open(self.hdd, "wb") as f:
@@ -264,7 +290,10 @@ class Cell:
 
     def start(self, wait=True):
         listen = [arg for port in self.ports for arg in ("-listen", f"127.0.0.1:{port}")]
-        self.proc = Proc("cell", ["cell", "-debug", *listen, "-load", self.load, "-store", self.store, "-hdd", self.hdd, *metrics_args(self.metrics)], self.env).start()
+        cluster = [] if self.config is None else ["-c", self.config, "-id", str(self.id)]
+        self.proc = Proc("cell", ["cell", "-debug", *listen, "-load", self.load, "-store", self.store, "-hdd", self.hdd,
+                                  *cluster, *self.extra, *metrics_args(self.metrics)], self.env).start()
+        self.starts += 1
 
         if wait:
             for port in self.ports:
@@ -278,7 +307,48 @@ class Cell:
         return scrape(self.metrics)
 
     def stop(self):
+        self.supervising = False
+
         return self.proc.stop()
+
+    def supervise(self):
+        """As runit keeps a service: the cell is started again whenever it
+        exits, the running one adopted, until stop. With hold set, the next
+        start is stopped at once (SIGSTOP) and held is set."""
+
+        self.supervising = True
+        SUPERVISED.append(self)
+
+        def loop():
+            while self.supervising:
+                if self.proc is None or self.proc.proc.poll() is not None:
+                    self.start(wait=False)
+
+                    if self.hold.is_set():
+                        self.hold.clear()
+                        self.pause()
+                        self.held.set()
+
+                self.proc.proc.wait()
+                time.sleep(0.05)
+
+        threading.Thread(target=loop, daemon=True).start()
+
+        return self
+
+    def wait_starts(self, n, timeout=60):
+        deadline = time.time() + timeout
+
+        while time.time() < deadline:
+            if self.starts >= n:
+                return
+
+            time.sleep(0.02)
+
+        fail(f"cell {self.id} started {self.starts} times, not {n}")
+
+    def kill(self):
+        self.proc.kill()
 
     def pause(self):
         """SIGSTOP: the cell keeps its connections and answers nothing."""
@@ -450,6 +520,15 @@ class Etcd:
     def has(self, key):
         return self.get(key) is not None
 
+    def scan(self, prefix):
+        """Every key under the prefix with its value, as a dict."""
+
+        end = bytearray(prefix.encode())
+        end[-1] += 1
+        out = self.call("range", {"key": base64.b64encode(prefix.encode()).decode(), "range_end": base64.b64encode(bytes(end)).decode()})
+
+        return {base64.b64decode(kv["key"]).decode(): base64.b64decode(kv.get("value", "")) for kv in out.get("kvs", [])}
+
     def put(self, key, value):
         self.call("put", {"key": base64.b64encode(key.encode()).decode(), "value": base64.b64encode(value).decode()})
 
@@ -472,6 +551,43 @@ def pieces(m):
         return [p for c in m["chunks"] for p in c["pieces"]]
 
     return m.get("pieces") or []
+
+
+def chunks(m):
+    """The chunks of a manifest; an old one is a single chunk."""
+
+    if "chunks" in m:
+        return m["chunks"]
+
+    return [{"pieces": m["pieces"]}] if m.get("pieces") else []
+
+
+def chunk_len(m, i):
+    chunk = m.get("chunk") or m["size"]
+
+    return min((i + 1) * chunk, m["size"]) - i * chunk
+
+
+def piece_bytes(data, m, i, piece):
+    """Piece 0, 1 or 2 of chunk i of an object: its first half, its second
+    half padded with a zero to the length of the first, their xor."""
+
+    chunk = m.get("chunk") or m["size"]
+    c = data[i * chunk:i * chunk + chunk_len(m, i)]
+    n = (len(c) + 1) // 2
+    halves = [c[:n], c[n:] + b"\0" * (2 * n - len(c))]
+
+    if piece < 2:
+        return halves[piece]
+
+    return (int.from_bytes(halves[0], "big") ^ int.from_bytes(halves[1], "big")).to_bytes(n, "big")
+
+
+def cell_logs(cell_id=None):
+    """The text of every cell process started so far, of one cell or all."""
+
+    return [p.text() for p in PROCS if isinstance(p, Proc) and p.name.startswith("cell-")
+            and (cell_id is None or f"-id\x00{cell_id}\x00" in "\x00".join(p.args) + "\x00")]
 
 
 class Host:
@@ -544,6 +660,9 @@ class Cluster:
         with open(self.config, "w") as f:
             json.dump(spec, f)
 
+        for i, cell in enumerate([c for h in self.hosts for c in h.cells]):
+            cell.config, cell.id = self.config, i
+
         self.front = Front(self.config, listeners=front_listeners, env=front_env)
         self.front_ports = self.front.ports
         self.front_port = self.front.port
@@ -566,6 +685,31 @@ class Cluster:
             procs.append(proc)
 
         return procs
+
+    def run(self, *args):
+        """A one-shot command over the cluster's config: s3 <cmd> -c config <args>."""
+
+        return run(args[0], "-c", self.config, *args[1:])
+
+    def keeper(self, *args, env=None):
+        return Proc("keeper", ["keeper", "-debug", "-c", self.config, *args], env).start()
+
+    def live(self, cell_id):
+        """The bytes of the pieces the manifests place on a cell."""
+
+        total = 0
+
+        for raw in self.etcd.scan("obj/").values():
+            m = json.loads(raw)
+
+            for i, c in enumerate(chunks(m)):
+                n = chunk_len(m, i)
+
+                for p in c["pieces"]:
+                    if p["cell"] == cell_id:
+                        total += (n + 1) // 2
+
+        return total
 
     def web(self, env=None):
         port = free_port()

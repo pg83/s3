@@ -14,8 +14,7 @@ import (
 type Repairer struct {
 	store *Store
 	host  string
-	rate  int64
-	paid  time.Time
+	pacer *pacer
 }
 
 func runRepair(cfg *Config, host string, rate int64, metrics string) {
@@ -36,7 +35,7 @@ func runRepair(cfg *Config, host string, rate int64, metrics string) {
 		}
 	}
 
-	r := &Repairer{store: s, host: host, rate: rate}
+	r := &Repairer{store: s, host: host, pacer: &pacer{rate: rate, prefix: "s3_repair"}}
 	prefix := "repair/" + host + "/"
 
 	serveMetrics(metrics, r.gauges)
@@ -136,7 +135,7 @@ func (r *Repairer) fix(bucket, key string, entry int64) {
 			}
 		}
 
-		r.pace(remote)
+		r.pacer.pace(remote)
 
 		changed := false
 
@@ -153,7 +152,7 @@ func (r *Repairer) fix(bucket, key string, entry int64) {
 			return
 		}
 
-		if r.store.etcd.putIfRevision(objKey(bucket, key), throw2(json.Marshal(m)), rev) {
+		if _, ok := r.store.etcd.putIfRevision(objKey(bucket, key), throw2(json.Marshal(m)), rev); ok {
 			r.drop(bucket, key, entry)
 			fixed("mended")
 			slog.Info("repair: mended", "bucket", bucket, "key", key, "chunks", len(m.Chunks))
@@ -254,25 +253,6 @@ func (r *Repairer) pieceOf(key string, i int, by map[int]Piece) int {
 	}
 
 	return -1
-}
-
-func (r *Repairer) pace(n int) {
-	metricAdd("s3_repair_network_bytes_total", "", float64(n))
-
-	if r.rate <= 0 || n == 0 {
-		return
-	}
-
-	if now := time.Now(); r.paid.Before(now) {
-		r.paid = now
-	}
-
-	r.paid = r.paid.Add(time.Duration(float64(n) / float64(r.rate) * float64(time.Second)))
-
-	wait := time.Until(r.paid)
-
-	metricAdd("s3_repair_paused_seconds_total", "", wait.Seconds())
-	time.Sleep(wait)
 }
 
 func fixed(result string) {

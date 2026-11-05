@@ -164,13 +164,13 @@ func (e *Etcd) move(from, to string, rev int64) bool {
 	return resp.Succeeded
 }
 
-func (e *Etcd) putIfRevision(key string, value []byte, rev int64) bool {
+func (e *Etcd) putIfRevision(key string, value []byte, rev int64) (int64, bool) {
 	resp := throw2(e.c.Txn(context.Background()).
 		If(clientv3.Compare(clientv3.ModRevision(key), "=", rev)).
 		Then(clientv3.OpPut(key, string(value))).
 		Commit())
 
-	return resp.Succeeded
+	return resp.Header.Revision, resp.Succeeded
 }
 
 func (e *Etcd) delIfRevision(key string, rev int64) bool {

@@ -44,10 +44,12 @@ A cluster is at least three hosts, each with some disks and an SSD,
 an etcd every host reaches, and a config file on every host.
 
 ```
-s3 cell -listen addr [-listen addr] -load dir -store dir -hdd device [-metrics addr]
+s3 cell -listen addr [-listen addr] -load dir -store dir -hdd device [-c config.json -id n] [-rate 50M] [-batch 64M] [-metrics addr]
 s3 front -c config.json -listen addr [-listen addr] [-metrics addr]
 s3 repair -c config.json -host name [-rate 50M] [-metrics addr]
 s3 scan -c config.json -host name [-age 10m]
+s3 keeper -c config.json [-every 10m] [-full 0.75]
+s3 compact -c config.json [cell]
 s3 web -c config.json -listen addr
 ```
 
@@ -66,10 +68,62 @@ loopback, where the repair of its own host reaches it, and the address
 the other hosts reach it at.
 
 A disk is an append-only log. Deleting or overwriting an object frees
-no space on it. A cell whose disk fills up refuses further writes and
-keeps serving reads until it is restarted; after that it does not
-start at all, and there is no tool yet to move its pieces elsewhere.
-Size the disks for everything that will ever be written to them.
+no space on it until the cell is rebuilt, see below. A cell whose disk
+fills up refuses further writes and keeps serving reads until it is
+restarted; after that it does not start at all, unless it is queued
+for a rebuild, which it looks for once at every start.
+
+`-c` and `-id` tie a cell to the cluster: the config every host has,
+and the cell's id in it. Without them the cell is just a log and is
+never rebuilt.
+
+### Rebuild
+
+A cell is rebuilt when the key `rebuild/<id>` appears in etcd; the
+keeper puts it there, or `s3 compact` by hand. The cell leaves at once,
+without finishing what it was doing: what it acknowledged is on the
+SSD, and what it did not is a cell gone down to whoever sent it. It
+marks its store first, so the next start is a rebuild whatever etcd
+says by then, and a rebuild once begun is always finished.
+
+The rebuild serves nothing; to the rest of the cluster the cell is
+down. It sends its old log to the HDD whole, forgets the copies in the
+load, and writes the log again from the start with only the pieces the
+keys point at, in the order of their offsets, having read every key
+once before it starts. A piece never lands past where it was read from,
+so the old bytes are always ahead of the new head: a piece that
+matches its hash there comes from the cell itself, and one that does
+not, or has no hash yet, is made from the other two pieces of its
+chunk, at `-rate` from the other hosts. That makes one pass for a log
+full of garbage and for a disk that came back empty. Every `-batch`
+written reaches the SSD before the keys of what it holds are moved to
+it; a key changed meanwhile is read again, and a piece it no longer
+points at is left behind as garbage. A chunk with no two good pieces
+left is owed to the repair of the host. Killed in the middle, the cell
+picks up where its SSD says the new log ends, keeps what the keys
+already point at below that, and makes again what it had moved but
+not yet put in a key. When done it removes its key and its mark,
+exits, and serves at the new head from its next start.
+
+While a cell is rebuilt its pieces live on two hosts, so one cell is
+rebuilt at a time, and none while another cell is down. A key written
+after the rebuild read the keys and still pointing at the cell's old
+log is caught by the hash on its next read and mended by the repair.
+
+### Keeper
+
+`s3 keeper` runs on every host; one holds a lock in etcd and the
+others wait for it. Every `-every` it asks every cell how full it is,
+and queues the fullest past `-full` of its disk, unless a rebuild is
+under way or a cell is down.
+
+### Compact
+
+`s3 compact -c config.json` lists the cells being rebuilt; with a cell,
+by its id or as `host/index` (the index counts the cells of the host
+in the order of the config), it queues that cell, one at a time, as
+the keeper does. A new disk is put in place the same way: an empty
+log and an empty SSD, queued, rebuilt from the other hosts.
 
 ### Front
 
@@ -152,8 +206,15 @@ started; gauges are computed when the page is asked for.
 - front: `s3_front_requests_total{method,target,code}` (499 when the
   client left before an answer), `s3_front_request_seconds`, the bytes
   received and sent, and the bodies in flight.
-- front and repair: `s3_link_seconds{cell,op}` (a request to a cell to
-  its reply), `s3_link_failures_total{cell,op,reason}`,
+- a cell being rebuilt: `s3_cell_rebuild_pieces_total{source}` and
+  `s3_cell_rebuild_bytes_total{source}` (self, neighbours, kept, owed,
+  skipped), `s3_cell_rebuild_keys_total{result}` (moved, raced, gone),
+  `s3_cell_rebuild_network_bytes_total`,
+  `s3_cell_rebuild_paused_seconds_total` (slept to hold `-rate`); the
+  gauge `s3_cell_rebuild_pieces_left` beside the cell's own.
+- front, repair and a cell being rebuilt: `s3_link_seconds{cell,op}`
+  (a request to a cell to its reply),
+  `s3_link_failures_total{cell,op,reason}`,
   `s3_link_disconnects_total{cell}`, `s3_link_queue_messages{cell}`.
 - repair: `s3_repair_fixes_total{result}`, `s3_repair_pass_seconds`,
   `s3_repair_pass_errors_total`, `s3_repair_network_bytes_total` (read
@@ -207,9 +268,9 @@ authentication or encryption. Keep it private.
 
 No multipart uploads, no server-side copy, no signatures, no CORS, no
 bucket policies, ACLs or versioning, no buckets made over the API. No
-limit on the size of an object beyond the front's memory. No space
-reclaimed on a disk, ever, and no tool to empty a full or dead one
-into the others yet.
+limit on the size of an object beyond the front's memory. Space comes
+back only by rebuilding a cell whole, and there is no tool to empty a
+dead disk into the other disks of its host.
 
 ## License
 

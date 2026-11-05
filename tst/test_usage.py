@@ -7,7 +7,7 @@ r = lib.run()
 if r.returncode != 1 or "Usage: s3 command" not in r.stderr:
     lib.fail(f"no usage without a command: rc={r.returncode} stderr={r.stderr!r}")
 
-for cmd in ("cell", "front", "repair", "scan", "web"):
+for cmd in ("cell", "front", "repair", "scan", "web", "keeper", "compact"):
     r = lib.run(cmd)
 
     if r.returncode != 1 or "required" not in r.stderr:
@@ -70,6 +70,40 @@ r = lib.run("repair", "-c", cfg, "-host", "nope")
 
 if r.returncode != 1 or "no cells of host nope" not in r.stderr:
     lib.fail(f"repair of a host that is not there: rc={r.returncode} stderr={r.stderr!r}")
+
+for args, want in (
+    (("keeper", "-c", cfg, "-every", "0s"), "-every must be positive"),
+    (("keeper", "-c", cfg, "-full", "1.5"), "-full is a share of a disk"),
+    (("keeper", "-c", cfg, "-full", "0"), "-full is a share of a disk"),
+    (("cell", "-batch", "lots"), "invalid value"),
+):
+    r = lib.run(*args)
+
+    if r.returncode not in (1, 2) or want not in r.stderr:
+        lib.fail(f"{args}: rc={r.returncode} stderr={r.stderr!r}")
+
+# a cell is rebuilt by its id in the config, and only with the config at hand
+root = tempfile.mkdtemp(prefix="s3usage-cell-")
+hdd = os.path.join(root, "hdd")
+
+with open(hdd, "wb") as f:
+    f.truncate(8 << 20)
+
+cell = ["cell", "-listen", "127.0.0.1:1", "-load", os.path.join(root, "load"), "-store", os.path.join(root, "store"), "-hdd", hdd]
+r = lib.run(*cell, "-c", cfg, "-id", "7")
+
+if r.returncode != 1 or "-id names no cell of the config" not in r.stderr:
+    lib.fail(f"cell of no id: rc={r.returncode} stderr={r.stderr!r}")
+
+os.makedirs(os.path.join(root, "store"))
+
+with open(os.path.join(root, "store", "rebuild"), "w") as f:
+    f.write("queued")
+
+r = lib.run(*cell)
+
+if r.returncode != 1 or "is being rebuilt, which needs -c and -id" not in r.stderr:
+    lib.fail(f"a cell marked for a rebuild with no config: rc={r.returncode} stderr={r.stderr!r}")
 
 r = lib.run("nonsense")
 

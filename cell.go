@@ -71,14 +71,40 @@ type Cell struct {
 	size     int64
 }
 
-func runCell(listen []string, load, store, hdd, metrics string) {
+func runCell(listen []string, load, store, hdd, metrics string, cfg *Config, id int, rate, batch int64) {
 	if len(listen) == 0 || load == "" || store == "" || hdd == "" {
 		throwFmt("cell: -listen, -load, -store and -hdd are required")
 	}
 
+	if cfg != nil {
+		if _, ok := cellSpec(cfg, id); !ok {
+			throwFmt("cell: -id names no cell of the config")
+		}
+	}
+
 	c := openCell(load, store, hdd)
 
+	if state := c.marked(); state != "" {
+		if cfg == nil {
+			throwFmt("cell: %s is being rebuilt, which needs -c and -id", store)
+		}
+
+		c.rebuild(cfg, id, state, rate, batch, metrics)
+
+		return
+	}
+
+	var e *Etcd
+
+	if cfg != nil {
+		e = newEtcd(cfg.Etcd)
+	}
+
 	if c.capacity-c.head() < minFree {
+		if e != nil {
+			c.leaveIfQueued(e, id)
+		}
+
 		throwFmt("cell: %s is full (%d of %d bytes used), not serving", hdd, c.head(), c.capacity)
 	}
 
@@ -94,6 +120,10 @@ func runCell(listen []string, load, store, hdd, metrics string) {
 	go c.writer()
 	go c.flusher()
 	go c.loader()
+
+	if e != nil {
+		go c.watchRebuild(e, id)
+	}
 
 	for _, ln := range lns[1:] {
 		go c.accept(ln)
@@ -366,10 +396,14 @@ func (c *Cell) put(data []byte) (int64, error) {
 }
 
 func alignedBlock() []byte {
-	raw := make([]byte, blockSize+ioAlign)
+	return aligned(blockSize)
+}
+
+func aligned(n int) []byte {
+	raw := make([]byte, n+ioAlign)
 	skew := (ioAlign - int(uintptr(unsafe.Pointer(&raw[0]))%ioAlign)) % ioAlign
 
-	return raw[skew : skew+blockSize]
+	return raw[skew : skew+n]
 }
 
 func (c *Cell) flusher() {
