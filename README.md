@@ -210,6 +210,7 @@ started; gauges are computed when the page is asked for.
 - a cell being rebuilt: `s3_cell_rebuild_pieces_total{source}` and
   `s3_cell_rebuild_bytes_total{source}` (self, neighbours, kept, owed,
   skipped), `s3_cell_rebuild_keys_total{result}` (moved, raced, gone),
+  `s3_cell_rebuild_hdd_read_bytes_total` (the old log read back),
   `s3_cell_rebuild_network_bytes_total`,
   `s3_cell_rebuild_paused_seconds_total` (slept to hold `-rate`); the
   gauge `s3_cell_rebuild_pieces_left` beside the cell's own.

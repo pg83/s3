@@ -5,6 +5,7 @@ matching its hash and every object whole. Puts and gets go on while the
 cell is away, and it takes writes at its new head when it is back. The
 queue holds one cell at a time and says what it holds."""
 
+import json
 import os
 import random
 import time
@@ -82,6 +83,23 @@ for i in range(1, 40, 3):
 
 wait("the third pieces", settled)
 
+# a key of the old format, one chunk of 70 MB: its piece is longer than
+# what the rebuild reads of the old log at once, and has no hash to be
+# checked by, so it comes from the other two pieces
+giant = os.urandom(70 * MB)
+half = (len(giant) + 1) // 2
+d0, d1 = giant[:half], giant[half:] + b"\0" * (2 * half - len(giant))
+parity = (int.from_bytes(d0, "big") ^ int.from_bytes(d1, "big")).to_bytes(half, "big")
+pieces = []
+
+for piece, (cell_id, data) in enumerate(((0, d0), (2, d1), (4, parity))):
+    c = cluster.cell(cell_id).client()
+    pieces.append({"piece": piece, "cell": cell_id, "offset": c.append(data)})
+    c.close()
+
+etcd.put("obj/c/giant", json.dumps({"size": len(giant), "md5": lib.md5(giant), "mtime": "2026-09-26T12:00:00Z", "pieces": pieces}).encode())
+blobs["giant"] = giant
+
 target = cluster.cell(0)
 head, _ = target.client().status()
 live = cluster.live(0)
@@ -148,7 +166,7 @@ if len(done) != 1:
 
 summary = dict(kv.split("=", 1) for kv in done[0].split() if "=" in kv)
 
-if summary["neighbours"] != "0" or summary["owed"] != "0" or int(summary["head"]) != live:
+if summary["neighbours"] != "1" or summary["owed"] != "0" or int(summary["head"]) != live:
     lib.fail(f"rebuild summary: {done[0]}, {live} live before it")
 
 if os.path.exists(os.path.join(target.store, "rebuild")):

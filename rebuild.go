@@ -19,6 +19,7 @@ const (
 	markerQueued   = "queued"
 	markerRunning  = "running"
 	windowBlocks   = 16
+	readGap        = 2 << 20
 	rebuildScanTop = 1000
 )
 
@@ -197,7 +198,7 @@ func (c *Cell) rebuild(cfg *Config, id int, state string, rate, batch int64, met
 
 	slog.Info("cell: rebuilt", "cell", id, "head", c.num*blockSize+c.size, "self", r.counts["self"], "neighbours", r.counts["neighbours"],
 		"kept", r.counts["kept"], "homeless", r.counts["homeless"], "owed", r.counts["owed"], "moved", r.counts["moved"],
-		"raced", r.counts["raced"], "gone", r.counts["gone"], "skipped", r.counts["skipped"], "took", time.Since(start))
+		"raced", r.counts["raced"], "gone", r.counts["gone"], "skipped", r.counts["skipped"], "read", r.old.read, "took", time.Since(start))
 }
 
 func cellSpec(cfg *Config, id int) (CellSpec, bool) {
@@ -261,7 +262,7 @@ func (r *rebuilder) run() {
 
 	var homeless []rebuildPiece
 
-	for _, w := range r.work {
+	for i, w := range r.work {
 		r.left.Add(-1)
 
 		if w.offset < head {
@@ -277,7 +278,7 @@ func (r *rebuilder) run() {
 			continue
 		}
 
-		since += r.place(w, r.old.read(w.offset, w.n))
+		since += r.place(w, r.old.bytes(w.offset, w.n, r.reach(i)))
 		head = r.c.num*blockSize + r.c.size
 
 		if since >= r.batch {
@@ -528,27 +529,45 @@ type window struct {
 	capacity int64
 	buf      []byte
 	start    int64
+	n        int64
+	read     int64
 }
 
 func newWindow(hdd *os.File, capacity int64) *window {
-	return &window{hdd: hdd, capacity: capacity, buf: aligned(windowBlocks * blockSize), start: -1}
+	return &window{hdd: hdd, capacity: capacity, buf: aligned(windowBlocks * blockSize)}
 }
 
-func (w *window) read(off, n int64) []byte {
+func (w *window) bytes(off, n, until int64) []byte {
 	out := make([]byte, n)
 
 	for pos := off; pos < off+n; {
-		if w.start < 0 || pos < w.start || pos >= w.start+int64(len(w.buf)) {
-			w.start = pos &^ (blockSize - 1)
-			readHdd(w.hdd, w.capacity, w.buf, w.start)
+		if pos < w.start || pos >= w.start+w.n {
+			w.start = pos &^ (ioAlign - 1)
+			w.n = min(int64(len(w.buf)), (max(until, off+n)-w.start+ioAlign-1)&^(ioAlign-1))
+			readHdd(w.hdd, w.capacity, w.buf[:w.n], w.start)
+			w.read += w.n
+			metricAdd("s3_cell_rebuild_hdd_read_bytes_total", "", float64(w.n))
 		}
 
-		k := copy(out[pos-off:], w.buf[pos-w.start:])
-
-		pos += int64(k)
+		pos += int64(copy(out[pos-off:], w.buf[pos-w.start:w.n]))
 	}
 
 	return out
+}
+
+func (r *rebuilder) reach(i int) int64 {
+	w := r.work[i]
+	end := w.offset + w.n
+
+	for _, next := range r.work[i+1:] {
+		if next.offset-end > readGap || next.offset+next.n-w.offset > int64(len(r.old.buf)) {
+			break
+		}
+
+		end = max(end, next.offset+next.n)
+	}
+
+	return end
 }
 
 type pacer struct {

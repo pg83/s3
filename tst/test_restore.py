@@ -114,10 +114,15 @@ for key in sorted(blobs):
 raced = ["multi", max(last)[1]]
 live = cluster.live(0)
 
-# the second piece of the deleted key is not written at all, the key
-# being known gone by then
-m = etcd.manifest("r", "multi")
-skipped = (lib.chunk_len(m, max((p["offset"], i) for i, c in enumerate(m["chunks"]) for p in c["pieces"] if p["cell"] == 0)[1]) + 1) // 2
+# with a commit after every piece, the first piece of a key changed
+# underneath finds it out, and the rest of its pieces are not written
+skipped, skips = 0, 0
+
+for key in raced:
+    m = etcd.manifest("r", key)
+    mine = sorted((p["offset"], (lib.chunk_len(m, i) + 1) // 2) for i, c in enumerate(m["chunks"]) for p in c["pieces"] if p["cell"] == 0)
+    skipped += sum(n for _, n in mine[1:])
+    skips += len(mine) - 1
 
 # a key no one can read is passed over
 etcd.put("obj/r/zz-broken", b"{")
@@ -138,7 +143,7 @@ r = cluster.run("compact", "0")
 if r.returncode != 0 or "cell 0 (h0/0) queued" not in r.stdout:
     lib.fail(f"compact 0: rc={r.returncode} {r.stdout!r} {r.stderr!r}")
 
-target.extra = ["-batch", "1M", "-rate", "8M"]
+target.extra = ["-batch", "1", "-rate", "8M"]
 target.supervise()
 
 wait("the rebuild to plan", lambda: "rebuild planned" in target.proc.text(), timeout=60)
@@ -173,7 +178,7 @@ if len(done) != 1:
 summary = dict(kv.split("=", 1) for kv in done[0].split() if "=" in kv)
 
 if (summary["self"] != "0" or summary["owed"] != "1" or summary["neighbours"] == "0" or summary["raced"] != "2" or summary["gone"] != "2"
-        or summary["skipped"] != "1"):
+        or summary["skipped"] != str(skips)):
     lib.fail(f"rebuild summary: {done[0]}")
 
 head, _ = target.client().status()
