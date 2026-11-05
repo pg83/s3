@@ -120,7 +120,7 @@ for args, want in ((("h9/0",), "no cell h9/0"), (("h0/7",), "no cell h0/7"), (("
     if r.returncode != 1 or want not in r.stderr:
         lib.fail(f"compact {args}: rc={r.returncode} {r.stderr!r}")
 
-target.extra = ["-batch", "1M"]
+target.extra = ["-batch", "8M"]
 target.hold.set()
 target.supervise()
 
@@ -168,6 +168,14 @@ summary = dict(kv.split("=", 1) for kv in done[0].split() if "=" in kv)
 
 if summary["neighbours"] != "1" or summary["owed"] != "0" or int(summary["head"]) != live:
     lib.fail(f"rebuild summary: {done[0]}, {live} live before it")
+
+# the HDD is flushed a -batch at a time; only the old log's leftovers
+# may go before, as the rebuild starts
+rebuilt = next(text for text in lib.cell_logs(0) if "cell: rebuilt" in text)
+flushes = [int(line.split("blocks=")[1].split()[0]) for line in rebuilt.splitlines() if "cell: flushed" in line]
+
+if not any(n >= 4 for n in flushes) or any(n < 4 for n in flushes[1:]):
+    lib.fail(f"the rebuild flushed blocks {flushes}, with -batch 8M")
 
 if os.path.exists(os.path.join(target.store, "rebuild")):
     lib.fail("the mark outlived the rebuild")

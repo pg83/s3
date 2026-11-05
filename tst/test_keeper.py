@@ -129,13 +129,14 @@ def watch():
 
 threading.Thread(target=watch, daemon=True).start()
 
-# the first round queues the fullest cell, the next one leaves it be
+# the first round queues the fullest cell, one of them on a tie, the
+# next one leaves it be
 now = heads()
-fullest = max(range(6), key=lambda i: (now[i], -i))
+fullest = [i for i in range(6) if now[i] == max(now)]
 out = keeper()
 
-if "queued a compaction" not in out or not etcd.has(f"rebuild/{fullest}"):
-    lib.fail(f"the first round queued {sorted(etcd.scan('rebuild/'))}, not cell {fullest}: {out!r}")
+if "queued a compaction" not in out or not any(etcd.has(f"rebuild/{i}") for i in fullest):
+    lib.fail(f"the first round queued {sorted(etcd.scan('rebuild/'))}, not one of cells {fullest}: {out!r}")
 
 if "a rebuild is under way" not in keeper():
     lib.fail("a round during a rebuild did not leave it alone")

@@ -171,7 +171,7 @@ func (c *Cell) rebuild(cfg *Config, id int, state string, rate, batch int64, met
 		c.reset()
 	}
 
-	go c.flusher()
+	go c.flusher(max(1, int(batch/blockSize)))
 
 	r := &rebuilder{
 		c:       c,

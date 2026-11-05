@@ -118,7 +118,7 @@ func runCell(listen []string, load, store, hdd, metrics string, cfg *Config, id 
 	slog.Info("cell: serving", "listen", listen, "block", c.num, "head", c.head(), "capacity", c.capacity)
 
 	go c.writer()
-	go c.flusher()
+	go c.flusher(1)
 	go c.loader()
 
 	if e != nil {
@@ -406,11 +406,14 @@ func aligned(n int) []byte {
 	return raw[skew : skew+n]
 }
 
-func (c *Cell) flusher() {
+func (c *Cell) flusher(least int) {
 	buf := alignedBlock()
 
 	for {
-		c.flush(buf)
+		if len(blockNumbers(c.store, "")) >= least {
+			c.flush(buf)
+		}
+
 		<-c.ready
 	}
 }

@@ -72,7 +72,7 @@ func main() {
 			config := fs.String("c", "", "config file; with it the cell is rebuilt when it is queued")
 			id := fs.Int("id", -1, "id of this cell in the config")
 			rate := sizeFlag(fs, "rate", 0, "bytes per second a rebuild reads from the cells of other hosts, e.g. 50M; none by default")
-			batch := sizeFlag(fs, "batch", 64<<20, "bytes a rebuild writes between two updates of the keys")
+			batch := sizeFlag(fs, "batch", 64<<20, "bytes a rebuild writes between two updates of the keys, and between two flushes to the HDD")
 			metrics := metricsFlag(fs)
 
 			parse(fs, debug)

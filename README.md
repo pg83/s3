@@ -97,8 +97,10 @@ not, or has no hash yet, is made from the other two pieces of its
 chunk, at `-rate` from the other hosts. That makes one pass for a log
 full of garbage and for a disk that came back empty. Every `-batch`
 written reaches the SSD before the keys of what it holds are moved to
-it; a key changed meanwhile is read again, and a piece it no longer
-points at is left behind as garbage. A chunk with no two good pieces
+it, and goes on to the HDD under a single flush, as an SMR disk takes
+a fifth of a second for a flush however little it holds; a key changed
+meanwhile is read again, and a piece it no longer points at is left
+behind as garbage. A chunk with no two good pieces
 left is owed to the repair of the host. Killed in the middle, the cell
 picks up where its SSD says the new log ends, keeps what the keys
 already point at below that, and makes again what it had moved but
